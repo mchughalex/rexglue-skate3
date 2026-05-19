@@ -426,6 +426,8 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
   auto& binary = ctx.binary();
   auto& ehDiscoveredFuncs = state.ehDiscoveredFuncs;
 
+  graph.setSymbolPrefix(config.symbolPrefix);
+
   // Merge user hints into analysis state
   for (const auto& [addr, size] : config.invalidInstructionHints) {
     state.invalidInstructions[addr] = size;
@@ -555,7 +557,7 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
     configFuncs++;
 
     if (cfg.isChunk()) {
-      graph.registerChunk(address, size);
+      graph.registerChunk(address, size, cfg.parent);
       configChunks++;
     }
   }

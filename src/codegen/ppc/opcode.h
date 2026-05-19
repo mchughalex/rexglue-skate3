@@ -31,6 +31,7 @@ enum class InstrFormat : uint8_t {
   kM,    // Rotate/mask (RS, RA, RB, MB, ME, Rc)
   kMD,   // Rotate double-word (RS, RA, sh, mb, XO, Rc)
   kA,    // Floating-point arithmetic (FRT, FRA, FRB, FRC, XO, Rc)
+  kVA,   // Vector four-operand (VRT, VRA, VRB, VRC, XO)
   kVXR,  // Vector with record bit (VRT, VRA, VRB, Rc, XO)
 };
 
@@ -315,6 +316,15 @@ enum class Opcode : uint16_t {
   vsububm,  // Vector subtract unsigned byte modulo
   vsubuhm,  // Vector subtract unsigned halfword modulo
   vsubuwm,  // Vector subtract unsigned word modulo
+  vmhaddshs,   // Vector multiply-high and add signed halfword saturate
+  vmhraddshs,  // Vector multiply-high round and add signed halfword saturate
+  vmladduhm,   // Vector multiply-low and add unsigned halfword modulo
+  vmsumubm,    // Vector multiply-sum unsigned byte modulo
+  vmsummbm,    // Vector multiply-sum mixed-sign byte modulo
+  vmsumuhm,    // Vector multiply-sum unsigned halfword modulo
+  vmsumuhs,    // Vector multiply-sum unsigned halfword saturate
+  vmsumshm,    // Vector multiply-sum signed halfword modulo
+  vmsumshs,    // Vector multiply-sum signed halfword saturate
   vmuloub,  // Vector multiply odd unsigned byte
   vmulouh,  // Vector multiply odd unsigned halfword
   vmulouw,  // Vector multiply odd unsigned word
@@ -441,6 +451,7 @@ enum class Opcode : uint16_t {
   vsr,    // Vector shift right (128-bit)
   vslo,   // Vector shift left by octet
   vsro,   // Vector shift right by octet
+  vsldoi, // Vector shift left double by octet immediate
 
   // Vector conversion
   vcfux,   // Vector convert from unsigned fixed-point word

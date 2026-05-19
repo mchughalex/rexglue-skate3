@@ -1299,9 +1299,13 @@ BoundsInfo scanForBounds(DecodedBinary& decoded, uint32_t bctrAddr, const CodeRe
     if (!insn)
       break;
 
-    // Stop at unconditional terminators - scanning past basic block boundaries
-    // risks finding unrelated comparisons on the index register
-    if (isTerminator(*insn) && !isConditional(*insn))
+    // EA commonly emits switch bounds as:
+    //   cmplwi idx,max; ble table_path; b default_path; table_path: ... bctr
+    // Keep scanning past that unconditional default branch so the compare is
+    // visible to the jump-table reader.
+    if (isTerminator(*insn) && !isConditional(*insn) &&
+        insn->opcode != rex::codegen::ppc::Opcode::b &&
+        insn->opcode != rex::codegen::ppc::Opcode::ba)
       break;
 
     using namespace rex::codegen::ppc;

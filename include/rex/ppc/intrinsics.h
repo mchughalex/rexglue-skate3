@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <bit>
 #include <climits>
 #include <cmath>
 #include <cstring>
@@ -29,6 +30,100 @@
 #include <rex/types.h>
 
 namespace rex::ppc {
+
+inline uint32_t ppc_vrsqrtefp_bits(uint32_t bits) {
+  static constexpr uint32_t table[32] = {
+      0x0568B4FD, 0x04F3AF97, 0x048DAAA5, 0x0435A618, 0x03E7A1E4, 0x03A29DFE,
+      0x03659A5C, 0x032E96F8, 0x02FC93CA, 0x02D090CE, 0x02A88DFE, 0x02838B57,
+      0x026188D4, 0x02438673, 0x02268431, 0x020B820B, 0x03D27FFA, 0x03807C29,
+      0x033878AA, 0x02F97572, 0x02C27279, 0x02926FB7, 0x02666D26, 0x023F6AC0,
+      0x021D6881, 0x01FD6665, 0x01E16468, 0x01C76287, 0x01AF60C1, 0x01995F12,
+      0x01855D79, 0x01735BF4,
+  };
+
+  uint32_t sign = bits >> 31;
+  uint32_t biased_exp = (bits >> 23) & 0xFF;
+  uint32_t mantissa = bits & 0x007FFFFF;
+
+  if (bits == 0xFF800000u)
+    return 0x7FC00000u;
+
+  if (biased_exp == 0)
+    return sign ? 0xFF800000u : 0x7F800000u;
+
+  if (biased_exp == 0xFF) {
+    if (mantissa == 0)
+      return 0;
+    return bits | 0x00400000u;
+  }
+
+  if (sign)
+    return 0x7FC00000u;
+
+  int32_t unbiased_exp = int32_t(biased_exp) - 127;
+  uint32_t index = ((((uint32_t(unbiased_exp) << 4) & 16) | (mantissa >> 19)) ^ 16);
+  uint32_t interp = (mantissa >> 9) & 1023;
+  int32_t result_exp = (127 - int32_t(biased_exp)) >> 1;
+  uint32_t entry = table[index];
+  uint32_t slope = entry >> 16;
+  uint32_t base = (entry << 10) & 0x3FFFC00u;
+  int32_t raw = int32_t(base) - int32_t(interp * slope);
+
+  if (!(raw & (1 << 25))) {
+    uint32_t val = uint32_t(raw) & 0x1FFFFFFu;
+    uint32_t lz = std::countl_zero(val);
+    int32_t shift = int32_t(lz) - 6;
+    result_exp += 6 - int32_t(lz);
+    raw <<= shift;
+  }
+
+  if ((raw & 5) && (raw & 2))
+    raw += 4;
+
+  uint32_t result = uint32_t((result_exp << 23) + 0x3F800000) | ((uint32_t(raw) >> 2) & 0x7FFFFFu);
+  if (((result >> 23) & 0xFF) == 0 && (result & 0x7FFFFF))
+    result = 0;
+  return result;
+}
+
+inline float ppc_vrsqrtefp(float value) {
+  return std::bit_cast<float>(ppc_vrsqrtefp_bits(std::bit_cast<uint32_t>(value)));
+}
+
+inline simde__m128 simde_mm_vrsqrtefp_ps(simde__m128 value) {
+  alignas(16) float lanes[4];
+  simde_mm_store_ps(lanes, value);
+  for (float& lane : lanes)
+    lane = ppc_vrsqrtefp(lane);
+  return simde_mm_load_ps(lanes);
+}
+
+// Match Xenia's vmsum3fp128/vmsum4fp128 lowering: a single-precision SSE dot
+// product, followed by the emulator's overflow-to-QNaN behavior and guest FTZ.
+inline float ppc_vmsumfp_result(float value) {
+  constexpr uint32_t qnan_bits = 0x7FC00000u;
+  if (!std::isfinite(value))
+    return std::bit_cast<float>(qnan_bits);
+  uint32_t bits = std::bit_cast<uint32_t>(value);
+  if (((bits >> 23) & 0xFF) == 0 && (bits & 0x007FFFFFu) != 0) {
+    bits &= 0x80000000u;  // preserve sign, clear exponent + mantissa
+  }
+  return std::bit_cast<float>(bits);
+}
+
+inline simde__m128 ppc_vmsumfp_result(simde__m128 value) {
+  alignas(16) float lanes[4];
+  simde_mm_store_ps(lanes, value);
+  return simde_mm_set1_ps(ppc_vmsumfp_result(lanes[0]));
+}
+
+inline simde__m128 simde_mm_vmsum3fp128_ps(simde__m128 a, simde__m128 b) {
+  return ppc_vmsumfp_result(simde_mm_dp_ps(a, b, 0xEF));
+}
+
+inline simde__m128 simde_mm_vmsum4fp128_ps(simde__m128 a, simde__m128 b) {
+  return ppc_vmsumfp_result(simde_mm_dp_ps(a, b, 0xFF));
+}
 
 //=============================================================================
 // Vector Load/Store Mask Tables

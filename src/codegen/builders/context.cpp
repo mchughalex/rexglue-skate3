@@ -195,7 +195,7 @@ void BuilderContext::emit_function_call(uint32_t address) {
 
       // Handle save/restore helpers
       if (cfg.nonVolatileRegistersAsLocalVariables &&
-          (name.find("__rest") == 0 || name.find("__save") == 0)) {
+          (name.find("__rest") != std::string::npos || name.find("__save") != std::string::npos)) {
         // print nothing - these are handled by local variable tracking
         return;
       }
@@ -242,6 +242,11 @@ void BuilderContext::emit_function_call(uint32_t address) {
   }
 
   // No pre-resolved target found - this is an error
+  if (auto* targetFn = graph().getFunction(address)) {
+    println("\t{}(ctx, base);", targetFn->name());
+    return;
+  }
+
   REXCODEGEN_ERROR("Unresolved function 0x{:08X} from 0x{:08X} (no CallTarget in FunctionNode)",
                    address, base);
   println("\t// FATAL: unresolved function 0x{:08X} (no CallTarget in FunctionNode)", address);
@@ -253,7 +258,7 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
 
   // Use classifyTarget for consistent branch classification
   // false = branch instruction (not a call), so own-base means loop back
-  auto kind = graph().classifyTarget(target, base, false);
+  auto kind = graph().classifyTarget(target, fn.base(), false);
 
   switch (kind) {
     case TargetKind::InternalLabel:
@@ -283,18 +288,33 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
           println("\t}}");
         }
       } else {
-        REXCODEGEN_ERROR("Unresolved conditional branch to 0x{:08X} from 0x{:08X} (no CallTarget)",
-                         target, base);
-        println("\tif ({}{}.{}) REX_FATAL(\"Unresolved branch from 0x{:08X} to 0x{:08X}\");",
-                not_ ? "!" : "", cr(insn.operands[0]), cond, base, target);
+        if (auto* targetFn = graph().getFunction(target)) {
+          println("\tif ({}{}.{}) {{", not_ ? "!" : "", cr(insn.operands[0]), cond);
+          println("\t\t{}(ctx, base);", targetFn->name());
+          println("\t\treturn;");
+          println("\t}}");
+        } else {
+          REXCODEGEN_ERROR(
+              "Unresolved conditional branch to 0x{:08X} from 0x{:08X} (no CallTarget)",
+              target, base);
+          println("\tif ({}{}.{}) REX_FATAL(\"Unresolved branch from 0x{:08X} to 0x{:08X}\");",
+                  not_ ? "!" : "", cr(insn.operands[0]), cond, base, target);
+        }
       }
       break;
 
     case TargetKind::Unknown:
-      REXCODEGEN_ERROR("Unresolved conditional branch to 0x{:08X} from 0x{:08X}", target, base);
-      println("\t// ERROR: conditional branch to unknown address 0x{:08X}", target);
-      println("\tif ({}{}.{}) REX_FATAL(\"Unresolved branch from 0x{:08X} to 0x{:08X}\");",
-              not_ ? "!" : "", cr(insn.operands[0]), cond, base, target);
+      if (auto* targetFn = graph().getFunction(target)) {
+        println("\tif ({}{}.{}) {{", not_ ? "!" : "", cr(insn.operands[0]), cond);
+        println("\t\t{}(ctx, base);", targetFn->name());
+        println("\t\treturn;");
+        println("\t}}");
+      } else {
+        REXCODEGEN_ERROR("Unresolved conditional branch to 0x{:08X} from 0x{:08X}", target, base);
+        println("\t// ERROR: conditional branch to unknown address 0x{:08X}", target);
+        println("\tif ({}{}.{}) REX_FATAL(\"Unresolved branch from 0x{:08X} to 0x{:08X}\");",
+                not_ ? "!" : "", cr(insn.operands[0]), cond, base, target);
+      }
       break;
   }
 }
@@ -303,7 +323,7 @@ void BuilderContext::emit_set_flush_mode(bool enable) {
   auto newState = enable ? CSRState::VMX : CSRState::FPU;
   if (csrState != newState) {
     auto prefix = enable ? "enable" : "disable";
-    auto suffix = csrState != CSRState::Unknown ? "Unconditional" : "";
+    auto suffix = csrState == CSRState::Unknown ? "Unconditional" : "";
     println("\tctx.fpscr.{}FlushMode{}();", prefix, suffix);
 
     csrState = newState;

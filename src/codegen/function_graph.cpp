@@ -61,6 +61,18 @@ const char* AuthorityName(FunctionAuthority auth) {
   }
 }
 
+static bool HasEmittedBlockContaining(const FunctionNode* node, uint32_t addr) {
+  if (!node) {
+    return false;
+  }
+  for (const auto& block : node->blocks()) {
+    if (block.contains(addr)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 //=============================================================================
 // FunctionNode
 //=============================================================================
@@ -359,11 +371,11 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
 
     std::string name;
     if (base() == ctx.entryPoint) {
-      name = "xstart";
+      name = fmt::format("{}xstart", ctx.config.symbolPrefix);
     } else if (!name_.empty()) {
       name = name_;
     } else {
-      name = fmt::format("sub_{:08X}", base());
+      name = fmt::format("{}sub_{:08X}", ctx.config.symbolPrefix, base());
     }
 
     emit_println(out, "// STUB: Function at 0x{:08X} has no discovered code blocks", base());
@@ -471,11 +483,11 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
   // --- Function name ---
   std::string name;
   if (base() == ctx.entryPoint) {
-    name = "xstart";
+    name = fmt::format("{}xstart", ctx.config.symbolPrefix);
   } else if (!name_.empty()) {
     name = name_;
   } else {
-    name = fmt::format("sub_{:08X}", base());
+    name = fmt::format("{}sub_{:08X}", ctx.config.symbolPrefix, base());
   }
 
   // Function signature with weak/alias pattern
@@ -564,8 +576,8 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
               for (auto label : activeJt->targets) {
                 labels.emplace(label);
               }
-              REXCODEGEN_TRACE("Late-detected jump table at 0x{:08X} with {} entries", blockBase,
-                               activeJt->targets.size());
+              REXCODEGEN_INFO("Late-detected jump table at 0x{:08X} with {} entries", blockBase,
+                              activeJt->targets.size());
             }
           }
         }
@@ -617,7 +629,8 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     for (auto it = sehInfo->scopes.rbegin(); it != sehInfo->scopes.rend(); ++it) {
       const auto& scope = *it;
       if (scope.filter == 0 && scope.handler != 0) {
-        emit_println(body, "\t\t\tsub_{:08X}(ctx, base);  // __finally handler", scope.handler);
+        emit_println(body, "\t\t\t{}sub_{:08X}(ctx, base);  // __finally handler",
+                     ctx.config.symbolPrefix, scope.handler);
       }
     }
 
@@ -754,6 +767,7 @@ FunctionNode* FunctionGraph::addFunction(uint32_t base, uint32_t size, FunctionA
   // Create new node
   auto node = std::make_unique<FunctionNode>(base, size, authority);
   FunctionNode* nodePtr = node.get();
+  nodePtr->setName(makeSymbolName(nodePtr->name(), authority));
   functions_[base] = std::move(node);
   functionsByBase_[base] = nodePtr;
 
@@ -770,7 +784,7 @@ FunctionNode* FunctionGraph::addFunction(uint32_t base, uint32_t size, FunctionA
                                          std::string_view name, bool hasXrefs) {
   auto* node = addFunction(base, size, authority, hasXrefs);
   if (node && !name.empty()) {
-    node->setName(std::string(name));
+    node->setName(makeSymbolName(name, authority));
   }
   return node;
 }
@@ -880,8 +894,22 @@ size_t FunctionGraph::sealedCount() const {
 
 void FunctionGraph::setFunctionName(uint32_t entry, std::string name) {
   if (auto* node = getFunction(entry)) {
-    node->setName(std::move(name));
+    node->setName(makeSymbolName(name, node->authority()));
   }
+}
+
+void FunctionGraph::setSymbolPrefix(std::string prefix) {
+  symbolPrefix_ = std::move(prefix);
+}
+
+std::string FunctionGraph::makeSymbolName(std::string_view name, FunctionAuthority authority) const {
+  if (authority == FunctionAuthority::IMPORT || symbolPrefix_.empty()) {
+    return std::string(name);
+  }
+  if (name.starts_with(symbolPrefix_)) {
+    return std::string(name);
+  }
+  return fmt::format("{}{}", symbolPrefix_, name);
 }
 
 void FunctionGraph::setFunctionHasExceptionHandler(uint32_t entry, bool val) {
@@ -931,6 +959,18 @@ void FunctionGraph::addUnresolvedJumpToFunction(uint32_t entry, uint32_t site, u
   auto* node = getFunction(entry);
   if (!node)
     return;
+
+  // Configured chunks are address-taken entry points inside a parent function.
+  // They are local labels only when the destination block is actually emitted
+  // in this function body; otherwise the generated C++ must tail-call the
+  // separate landing function instead of emitting an invalid cross-function goto.
+  if (!isCall && chunkParent(target) != 0 && HasEmittedBlockContaining(node, target)) {
+    node->addLabel(target);
+    REXCODEGEN_TRACE(
+        "FunctionGraph: resolved 0x{:08X}->0x{:08X} as emitted chunk label in 0x{:08X}",
+        site, target, entry);
+    return;
+  }
 
   // Try immediate resolution against existing functions/imports
   if (auto* targetFn = getFunction(target)) {
@@ -983,9 +1023,24 @@ size_t FunctionGraph::tryResolveFunction(uint32_t entry) {
                    jumps.size());
 
   for (const auto& jump : jumps) {
-    // Try internal label first
-    if (node->tryResolveAsInternalLabel(jump.target)) {
-      REXCODEGEN_TRACE("  0x{:08X}->0x{:08X}: resolved as internal label", jump.site, jump.target);
+    // Configured chunks are internal labels only if their destination block is
+    // emitted in this function body. Other chunk entries are separate callable
+    // landings and must stay tail-call edges.
+    if (!jump.isCall && chunkParent(jump.target) != 0 &&
+        HasEmittedBlockContaining(node, jump.target)) {
+      node->addLabel(jump.target);
+      node->removeUnresolvedJump(jump.site);
+      resolved++;
+      REXCODEGEN_TRACE("  0x{:08X}->0x{:08X}: resolved as emitted chunk label", jump.site,
+                       jump.target);
+      continue;
+    }
+
+    // A branch to this function's own entry is a loop. Other known entry points
+    // inside an overlapping PDATA range must stay function/tail-call edges.
+    if (!jump.isCall && jump.target == entry && node->tryResolveAsInternalLabel(jump.target)) {
+      REXCODEGEN_TRACE("  0x{:08X}->0x{:08X}: resolved as internal entry label", jump.site,
+                       jump.target);
       node->removeUnresolvedJump(jump.site);
       resolved++;
       continue;
@@ -1000,6 +1055,14 @@ size_t FunctionGraph::tryResolveFunction(uint32_t entry) {
       } else {
         node->addTailCall(jump.site, CallTarget::function(targetFn));
       }
+      node->removeUnresolvedJump(jump.site);
+      resolved++;
+      continue;
+    }
+
+    // Try internal label after entry-point resolution.
+    if (node->tryResolveAsInternalLabel(jump.target)) {
+      REXCODEGEN_TRACE("  0x{:08X}->0x{:08X}: resolved as internal label", jump.site, jump.target);
       node->removeUnresolvedJump(jump.site);
       resolved++;
       continue;
@@ -1056,10 +1119,10 @@ size_t FunctionGraph::sealAllReady() {
         sealed++;
       } else {
         couldNotSeal++;
-        REXCODEGEN_DEBUG("FunctionGraph::sealAllReady: 0x{:08X} ({}) cannot seal ({} unresolved)",
-                         base, node->name(), node->unresolvedJumps().size());
+        REXCODEGEN_WARN("FunctionGraph::sealAllReady: 0x{:08X} ({}) cannot seal ({} unresolved)",
+                        base, node->name(), node->unresolvedJumps().size());
         for (const auto& jump : node->unresolvedJumps()) {
-          REXCODEGEN_DEBUG("  0x{:08X} -> 0x{:08X}", jump.site, jump.target);
+          REXCODEGEN_WARN("  0x{:08X} -> 0x{:08X}", jump.site, jump.target);
         }
       }
     }
@@ -1102,16 +1165,25 @@ void FunctionGraph::sealAll() {
     throw std::runtime_error(msg);
   }
 
-  REXCODEGEN_TRACE("FunctionGraph::sealAll: all {} functions sealed", functions_.size());
+  REXCODEGEN_INFO("FunctionGraph::sealAll: all {} functions sealed", functions_.size());
 }
 
 //=============================================================================
 // Vacancy Checking
 //=============================================================================
 
-void FunctionGraph::registerChunk(uint32_t base, uint32_t size) {
+void FunctionGraph::registerChunk(uint32_t base, uint32_t size, uint32_t parent) {
   chunks_.emplace_back(base, size);
-  REXCODEGEN_TRACE("FunctionGraph: registered chunk 0x{:08X}-0x{:08X}", base, base + size);
+  if (parent != 0) {
+    chunkParents_[base] = parent;
+  }
+  REXCODEGEN_TRACE("FunctionGraph: registered chunk 0x{:08X}-0x{:08X} parent=0x{:08X}", base,
+                   base + size, parent);
+}
+
+uint32_t FunctionGraph::chunkParent(uint32_t base) const {
+  auto it = chunkParents_.find(base);
+  return it != chunkParents_.end() ? it->second : 0;
 }
 
 bool FunctionGraph::isVacant(uint32_t fromAddr, uint32_t targetAddr) const {
@@ -1173,41 +1245,74 @@ bool FunctionGraph::isMergeableEntryPoint(uint32_t addr) const {
 
 TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
                                          bool isCallInstruction) const {
-  // Find the caller's function
-  const FunctionNode* callerFn = getFunctionContaining(callerAddr);
+  // Most builder callers pass the current function base as callerAddr. Prefer
+  // the exact node so overlapping PDATA ranges do not make branches look like
+  // self-loops in an enclosing function.
+  const FunctionNode* callerFn = getFunction(callerAddr);
+  if (!callerFn) {
+    callerFn = getFunctionContaining(callerAddr);
+  }
 
   // Case 1: Target is an import - always a call/tail-call
   if (isImport(target)) {
     return TargetKind::Import;
   }
 
-  // Case 2: Target is the caller's own entry point
-  if (callerFn && target == callerFn->base()) {
+  // Case 2: Target is a configured chunk whose block is emitted in this
+  // function body. If the chunk is only present as a separate landing function,
+  // it must be treated as a tail call so generated C++ never jumps to a label
+  // declared in another function.
+  if (callerFn && !isCallInstruction) {
+    if (chunkParent(target) != 0 && HasEmittedBlockContaining(callerFn, target)) {
+      return TargetKind::InternalLabel;
+    }
+  }
+
+  // Case 3: Target is the emitting function's own entry point. Builder callers
+  // pass the current function base as callerAddr, which is more reliable than
+  // containing-range lookup when PDATA functions overlap.
+  if (target == callerAddr) {
     // bl to own base = recursive call (Function)
     // b to own base = loop back to start (InternalLabel)
     return isCallInstruction ? TargetKind::Function : TargetKind::InternalLabel;
   }
 
-  // Case 3: Target is a DIFFERENT function's entry point - this is a call/tail-call
+  // Case 4: Target is a DIFFERENT function's entry point - this is a call/tail-call
   // This handles cases where a small thunk function branches to another function
   // whose entry point happens to fall within the thunk's address range
   if (isEntryPoint(target)) {
     return TargetKind::Function;
   }
 
-  // Case 4: Target is inside caller's function -> InternalLabel
+  // Case 5: Target is inside caller's function -> InternalLabel
   // For bl, this would be a rare PIC code pattern
   if (callerFn && callerFn->containsAddress(target)) {
     return TargetKind::InternalLabel;
   }
 
-  // Case 5: Unknown target
+  // Case 6: Unknown target
   return TargetKind::Unknown;
 }
 
 void FunctionGraph::notifyFunctionAdded(FunctionNode* newFunction) {
   for (auto& [base, node] : functions_) {
     if (node.get() != newFunction && node->isPending()) {
+      auto jumps = node->unresolvedJumps();
+      for (const auto& jump : jumps) {
+        if (jump.target != newFunction->base()) {
+          continue;
+        }
+
+        if (!jump.isCall && chunkParent(jump.target) != 0 &&
+            HasEmittedBlockContaining(node.get(), jump.target)) {
+          node->addLabel(jump.target);
+          node->removeUnresolvedJump(jump.site);
+          REXCODEGEN_TRACE(
+              "FunctionGraph: resolved 0x{:08X}->0x{:08X} as emitted chunk label in 0x{:08X}",
+              jump.site, jump.target, node->base());
+        }
+      }
+
       node->tryResolveAgainst(newFunction);
     }
   }

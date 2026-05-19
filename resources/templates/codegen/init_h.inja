@@ -49,8 +49,8 @@
 // Image Info
 //=============================================================================
 
-extern const rex::PPCImageInfo PPCImageConfig;
-extern PPCFuncMapping PPCFuncMappings[];
+extern const rex::PPCImageInfo {{ project }}_PPCImageConfig;
+extern PPCFuncMapping {{ project }}_PPCFuncMappings[];
 
 //=============================================================================
 // Function Definition Macros

@@ -930,6 +930,8 @@ bool XexModule::LoadContinue() {
     REXLOG_ERROR("Failed to load XEX PE headers!");
     return false;
   }
+  REXLOG_INFO("XEX image loaded at {:08X}-{:08X} (size {:08X})", base_address_,
+              base_address_ + image_size(), image_size());
 
   // Parse any "unsafe" headers into safer variants
   xex2_opt_generic_u32* alternate_titleids;
@@ -1009,7 +1011,10 @@ bool XexModule::LoadContinue() {
     }
   }
 
-  // Setup memory protection.
+  // Native recomp code performs direct host stores for guest writes. Some
+  // titles write to pages described as read-only in the XEX metadata, so keep
+  // loaded image pages writable instead of letting host page protection turn
+  // valid guest stores into access violations.
   for (uint32_t i = 0, page = 0; i < sec_header->page_descriptor_count; i++) {
     // Byteswap the bitfield manually.
     xex2_page_descriptor desc;
@@ -1017,15 +1022,7 @@ bool XexModule::LoadContinue() {
 
     auto address = base_address_ + (page * page_size);
     auto size = desc.page_count * page_size;
-    switch (desc.info) {
-      case XEX_SECTION_CODE:
-      case XEX_SECTION_READONLY_DATA:
-        heap->Protect(address, size, memory::kMemoryProtectRead);
-        break;
-      case XEX_SECTION_DATA:
-        heap->Protect(address, size, memory::kMemoryProtectRead | memory::kMemoryProtectWrite);
-        break;
-    }
+    heap->Protect(address, size, memory::kMemoryProtectRead | memory::kMemoryProtectWrite);
 
     page += desc.page_count;
   }

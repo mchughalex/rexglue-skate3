@@ -100,6 +100,10 @@ class FunctionGraph {
   size_t pendingCount() const;
   size_t sealedCount() const;
 
+  // Prefix generated C++ symbols for this graph. Imports are never prefixed.
+  void setSymbolPrefix(std::string prefix);
+  std::string makeSymbolName(std::string_view name, FunctionAuthority authority) const;
+
   //=========================================================================
   // Function Setup (called during Discover phase)
   //=========================================================================
@@ -165,7 +169,10 @@ class FunctionGraph {
   void setMemoryReader(MemoryReader reader) { memoryReader_ = std::move(reader); }
 
   // Register a chunk (address range claimed by config, blocks vacancy)
-  void registerChunk(uint32_t base, uint32_t size);
+  void registerChunk(uint32_t base, uint32_t size, uint32_t parent = 0);
+
+  // Return the configured parent for a chunk entry, or 0 for non-chunks.
+  uint32_t chunkParent(uint32_t base) const;
 
   // Check if a region is vacant for absorption
   // fromAddr: the address we're expanding from (to check for null boundary)
@@ -193,6 +200,8 @@ class FunctionGraph {
       functionsByBase_;  // sorted by base for O(log f) interval lookup
   std::unordered_map<uint32_t, bool> functionHasXrefs_;  // entry -> hasXrefs
   std::vector<std::pair<uint32_t, uint32_t>> chunks_;    // base, size pairs
+  std::unordered_map<uint32_t, uint32_t> chunkParents_;  // chunk base -> parent base
+  std::string symbolPrefix_;
   MemoryReader memoryReader_;
 
   // Notify all PENDING functions that a new function was added

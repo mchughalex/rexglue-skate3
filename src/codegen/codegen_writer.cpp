@@ -61,11 +61,11 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
       funcName = crtIt->second;
       isRexcrt = true;
     } else if (fn->base() == ctx.analysisState().entryPoint) {
-      funcName = "xstart";
+      funcName = cfg.symbolPrefix + "xstart";
     } else if (!fn->name().empty()) {
       funcName = fn->name();
     } else {
-      funcName = fmt::format("sub_{:08X}", fn->base());
+      funcName = fmt::format("{}sub_{:08X}", cfg.symbolPrefix, fn->base());
     }
 
     functionsJson.push_back({

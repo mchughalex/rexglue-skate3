@@ -81,6 +81,22 @@ void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
     }
   }
 
+  // Address-taken chunks are alternate entries into a parent function. When
+  // emitted as standalone dispatcher targets, they still need to run forward
+  // through the parent's shared tail/epilogue instead of stopping at the small
+  // chunk extent recorded in config.
+  if (uint32_t parentAddr = graph.chunkParent(funcAddr); parentAddr != 0) {
+    if (auto* parentNode = graph.getFunction(parentAddr)) {
+      const uint32_t parentEnd = parentNode->base() + parentNode->size();
+      if (parentEnd > funcAddr && parentEnd - funcAddr > pdataSize) {
+        pdataSize = parentEnd - funcAddr;
+        REXCODEGEN_TRACE(
+            "Analyze: 0x{:08X} is chunk of 0x{:08X}, using parent-derived size={}",
+            funcAddr, parentAddr, pdataSize);
+      }
+    }
+  }
+
   // Find the code region containing this function
   const CodeRegion* region = nullptr;
   for (const auto& r : ctx.scan.codeRegions) {
@@ -94,8 +110,29 @@ void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
     return;
   }
 
-  // Pass pdataSize so forward branches within function extent are correctly identified
-  auto result = discoverBlocks(decoded, funcAddr, *region, knownFunctions, pdataSize);
+  // Pass pdataSize so forward branches within function extent are correctly identified.
+  // Configured chunks are address-taken entries inside their parent, not hard local
+  // branch boundaries for that parent.
+  auto effectiveKnownFunctions = knownFunctions;
+  const uint32_t chunkParent = graph.chunkParent(funcAddr);
+  const uint32_t chunkLookupParent = chunkParent != 0 ? chunkParent : funcAddr;
+  auto chunkIt = ctx.analysisState().chunksByParent.find(chunkLookupParent);
+  if (chunkIt != ctx.analysisState().chunksByParent.end()) {
+    for (uint32_t chunkAddr : chunkIt->second) {
+      effectiveKnownFunctions.erase(chunkAddr);
+    }
+  }
+  if (pdataSize != 0) {
+    const uint32_t funcEnd = funcAddr + pdataSize;
+    for (const auto& [_, chunkAddrs] : ctx.analysisState().chunksByParent) {
+      for (uint32_t chunkAddr : chunkAddrs) {
+        if (chunkAddr >= funcAddr && chunkAddr < funcEnd) {
+          effectiveKnownFunctions.erase(chunkAddr);
+        }
+      }
+    }
+  }
+  auto result = discoverBlocks(decoded, funcAddr, *region, effectiveKnownFunctions, pdataSize);
 
   if (result.blocks.empty()) {
     REXCODEGEN_WARN("Analyze: no blocks found for function 0x{:08X}", funcAddr);
@@ -190,7 +227,7 @@ void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
 }
 
 void discoverAllFunctions(CodegenContext& ctx) {
-  REXCODEGEN_TRACE("Analyze: starting iterative discovery...");
+  REXCODEGEN_INFO("Analyze: starting iterative discovery...");
 
   auto& graph = ctx.graph;
   auto& binary = ctx.binary();
@@ -218,7 +255,7 @@ void discoverAllFunctions(CodegenContext& ctx) {
     }
   }
 
-  REXCODEGEN_TRACE("Analyze: {} functions after call graph expansion", graph.functionCount());
+  REXCODEGEN_INFO("Analyze: {} functions after call graph expansion", graph.functionCount());
 
   // VTable scanning
   {
@@ -227,6 +264,7 @@ void discoverAllFunctions(CodegenContext& ctx) {
 
     size_t newFunctions = 0;
 
+    size_t vtableLandings = 0;
     for (const auto& vt : vtables) {
       for (size_t i = 0; i < vt.slots.size(); i++) {
         uint32_t funcAddr = vt.slots[i];
@@ -236,13 +274,36 @@ void discoverAllFunctions(CodegenContext& ctx) {
         if (binary.isInImportExportRange(funcAddr))
           continue;
 
+        // Multi-entry-point handling: if the vtable slot falls *inside* an
+        // already-discovered function's body (not at its entry), promote the
+        // slot to a chunk (mid-function landing) of that parent. This mirrors
+        // what skate3_observed_runtime_landings.toml does for runtime-observed
+        // mid-function entries, but driven by static vtable analysis.
+        //
+        // Without this, addresses like 0x82EBAE4C (referenced by ~37 vtables
+        // but lying inside sub_82EBAE34) never enter the function table. xenia
+        // hybrid then can't route calls there and falls back to JIT.
+        if (FunctionNode* parent = graph.getFunctionContaining(funcAddr);
+            parent != nullptr && parent->base() != funcAddr) {
+          graph.registerChunk(funcAddr, 4, parent->base());
+          graph.addFunction(funcAddr, 4, FunctionAuthority::VTABLE, true);
+          vtableLandings++;
+          newFunctions++;
+          continue;
+        }
+
         graph.addFunction(funcAddr, 4, FunctionAuthority::VTABLE, true);
         newFunctions++;
       }
     }
+    if (vtableLandings > 0) {
+      REXCODEGEN_INFO("Analyze: VTable scan promoted {} slots to chunks of "
+                      "their containing functions (multi-entry-point)",
+                      vtableLandings);
+    }
 
-    REXCODEGEN_TRACE("Analyze: VTable scan found {} vtables, {} new functions", vtables.size(),
-                     newFunctions);
+    REXCODEGEN_INFO("Analyze: VTable scan found {} vtables, {} new functions", vtables.size(),
+                    newFunctions);
 
     // Continue discovery for vtable functions
     if (newFunctions > 0) {
@@ -263,7 +324,7 @@ void discoverAllFunctions(CodegenContext& ctx) {
     }
   }
 
-  REXCODEGEN_TRACE("Analyze: {} total functions after vtable scan", graph.functionCount());
+  REXCODEGEN_INFO("Analyze: {} total functions after vtable scan", graph.functionCount());
 }
 
 //=============================================================================
@@ -398,7 +459,7 @@ void functionPointerScan(CodegenContext& ctx) {
     }
   }
 
-  REXCODEGEN_TRACE("functionPointerScan: found {} new function pointer targets", foundCount);
+  REXCODEGEN_INFO("functionPointerScan: found {} new function pointer targets", foundCount);
 }
 
 }  // anonymous namespace

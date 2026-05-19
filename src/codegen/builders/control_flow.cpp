@@ -20,6 +20,28 @@
 
 namespace rex::codegen {
 
+namespace {
+
+bool hasEmittedBlockContaining(const FunctionNode& fn, uint32_t addr) {
+  for (const auto& block : fn.blocks()) {
+    if (block.contains(addr)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool isLocalChunkTarget(const BuilderContext& ctx, uint32_t target) {
+  const uint32_t targetParent = ctx.graph().chunkParent(target);
+  if (targetParent == 0) {
+    return false;
+  }
+
+  return hasEmittedBlockContaining(ctx.fn, target);
+}
+
+}  // namespace
+
 //=============================================================================
 // Unconditional Branch
 //=============================================================================
@@ -27,9 +49,16 @@ namespace rex::codegen {
 bool build_b(BuilderContext& ctx) {
   uint32_t target = ctx.insn.operands[0];
 
+  if (ctx.graph().getFunction(target) && target != ctx.fn.base() &&
+      !isLocalChunkTarget(ctx, target)) {
+    ctx.emit_function_call(target);
+    ctx.println("\treturn;");
+    return true;
+  }
+
   // Use graph to classify the target - handles thunks that branch to nearby functions
   // false = branch instruction (not a call), so own-base means loop back
-  auto kind = ctx.graph().classifyTarget(target, ctx.base, false);
+  auto kind = ctx.graph().classifyTarget(target, ctx.fn.base(), false);
 
   switch (kind) {
     case TargetKind::InternalLabel:
@@ -67,7 +96,7 @@ bool build_bl(BuilderContext& ctx) {
 
   // Use graph to classify the target
   // true = call instruction, so own-base means recursive call (not loop back)
-  auto kind = ctx.graph().classifyTarget(target, ctx.base, true);
+  auto kind = ctx.graph().classifyTarget(target, ctx.fn.base(), true);
 
   switch (kind) {
     case TargetKind::InternalLabel:
@@ -138,7 +167,7 @@ bool build_bctr(BuilderContext& ctx) {
         continue;
       }
 
-      auto kind = ctx.graph().classifyTarget(label, ctx.base, false);
+      auto kind = ctx.graph().classifyTarget(label, ctx.fn.base(), false);
       switch (kind) {
         case TargetKind::InternalLabel:
           ctx.println("\t\tgoto loc_{:X};", label);

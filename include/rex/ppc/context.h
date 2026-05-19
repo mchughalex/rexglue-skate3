@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -183,6 +184,9 @@ constexpr uint32_t kRoundMask = 0x03;
 
 struct FPSCRRegister {
   uint32_t csr;
+  uint32_t fpu_csr;
+  uint32_t vmx_csr;
+  bool vmx_mode;
 
   static constexpr size_t HostToGuest[] = {kRoundNearest, kRoundDown, kRoundUp, kRoundTowardZero};
 
@@ -190,48 +194,69 @@ struct FPSCRRegister {
   static constexpr size_t RoundShift = Platform::RoundShift;
   static constexpr size_t RoundMaskVal = Platform::RoundMaskVal;
   static constexpr size_t FlushMask = Platform::FlushMask;
+  static constexpr size_t ExceptionMask = Platform::ExceptionMask;
 
   inline uint32_t getcsr() noexcept { return Platform::getcsr(); }
   inline void setcsr(uint32_t csr) noexcept { Platform::setcsr(csr); }
 
   inline uint32_t loadFromHost() noexcept {
-    csr = getcsr();
-    return HostToGuest[(csr & RoundMaskVal) >> RoundShift];
+    if (!vmx_mode) {
+      fpu_csr = getcsr();
+      Platform::InitHostExceptions(fpu_csr);
+      fpu_csr &= ~FlushMask;
+      if (vmx_csr == 0) {
+        vmx_csr = ExceptionMask | FlushMask | Platform::GuestToHost[kRoundNearest];
+      }
+      csr = fpu_csr;
+    }
+    return HostToGuest[(fpu_csr & RoundMaskVal) >> RoundShift];
   }
 
   inline void storeFromGuest(uint32_t value) noexcept {
-    csr &= ~RoundMaskVal;
-    csr |= Platform::GuestToHost[value & kRoundMask];
+    fpu_csr &= ~RoundMaskVal;
+    fpu_csr |= Platform::GuestToHost[value & kRoundMask];
+    fpu_csr &= ~FlushMask;
+    fpu_csr |= ExceptionMask;
+    csr = fpu_csr;
+    vmx_mode = false;
     setcsr(csr);
   }
 
   inline void enableFlushModeUnconditional() noexcept {
-    csr |= FlushMask;
+    csr = vmx_csr;
+    vmx_mode = true;
     setcsr(csr);
   }
 
   inline void disableFlushModeUnconditional() noexcept {
-    csr &= ~FlushMask;
+    csr = fpu_csr;
+    vmx_mode = false;
     setcsr(csr);
   }
 
   inline void enableFlushMode() noexcept {
-    if ((csr & FlushMask) != FlushMask) [[unlikely]] {
-      csr |= FlushMask;
+    if (!vmx_mode || getcsr() != vmx_csr) [[unlikely]] {
+      csr = vmx_csr;
+      vmx_mode = true;
       setcsr(csr);
     }
   }
 
   inline void disableFlushMode() noexcept {
-    if ((csr & FlushMask) != 0) [[unlikely]] {
-      csr &= ~FlushMask;
+    if (vmx_mode || getcsr() != fpu_csr) [[unlikely]] {
+      csr = fpu_csr;
+      vmx_mode = false;
       setcsr(csr);
     }
   }
 
   inline void InitHost() noexcept {
-    csr = getcsr();
-    Platform::InitHostExceptions(csr);
+    fpu_csr = getcsr();
+    Platform::InitHostExceptions(fpu_csr);
+    fpu_csr &= ~FlushMask;
+    vmx_csr = ExceptionMask | FlushMask | Platform::GuestToHost[kRoundNearest];
+    csr = fpu_csr;
+    vmx_mode = false;
     setcsr(csr);
   }
 };
@@ -301,6 +326,12 @@ struct alignas(0x40) PPCContext {
 #endif
 #if !defined(REX_CONFIG_RESERVED_AS_LOCAL)
   PPCRegister reserved;
+  uint32_t reserved_address;
+  uint32_t reserved_size;
+  uint32_t reserved_bitmap_word;
+  uint64_t reserved_bitmap_mask;
+  bool reserved_global_acquired;
+  bool reserved_valid;
 #endif
 #if !defined(REX_CONFIG_SKIP_MSR)
   uint32_t msr = 0x200A000;
@@ -531,3 +562,47 @@ struct alignas(0x40) PPCContext {
   inline void RestoreNonVolatiles(const uint8_t*) {}
 #endif
 };
+
+namespace rex::ppc {
+
+constexpr uint32_t kReserveBlockShift = 16;
+constexpr uint32_t kReserveBlockCount = 1u << (32 - kReserveBlockShift);
+constexpr uint32_t kReserveBitmapWordCount = kReserveBlockCount / 64;
+
+inline std::atomic<uint64_t> g_reservation_bitmap[kReserveBitmapWordCount] = {};
+
+inline void ReleaseReservation(PPCContext& ctx) {
+  ctx.reserved_global_acquired = false;
+  ctx.reserved_valid = false;
+}
+
+inline bool AcquireReservation(PPCContext& ctx, uint32_t address, uint32_t size) {
+  ReleaseReservation(ctx);
+  ctx.reserved_address = address;
+  ctx.reserved_size = size;
+  ctx.reserved_bitmap_word = 0;
+  ctx.reserved_bitmap_mask = 0;
+  ctx.reserved_global_acquired = false;
+  ctx.reserved_valid = true;
+  return ctx.reserved_valid;
+}
+
+inline bool ReservationMatches(const PPCContext& ctx, uint32_t address) {
+  if (!ctx.reserved_valid) {
+    return false;
+  }
+  return ctx.reserved_address == address;
+}
+
+inline void ImportReservation(PPCContext& ctx, uint32_t address, uint64_t value) {
+  ReleaseReservation(ctx);
+  ctx.reserved.u64 = value;
+  ctx.reserved_address = address;
+  ctx.reserved_size = 0;
+  ctx.reserved_bitmap_word = 0;
+  ctx.reserved_bitmap_mask = 0;
+  ctx.reserved_global_acquired = false;
+  ctx.reserved_valid = true;
+}
+
+}  // namespace rex::ppc

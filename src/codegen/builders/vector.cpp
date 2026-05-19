@@ -30,16 +30,6 @@ namespace rex::codegen {
 // This file uses several magic constants from Intel SSE/SSE4 intrinsics.
 // Here are the key constants and their meanings:
 //
-// === Dot Product Masks (simde_mm_dp_ps) ===
-// The mask byte controls which elements participate in the dot product and
-// where the result is broadcast. Format: 0bAAAABBBB
-//   High nibble (AAAA): Which source elements to multiply (bit 7=x, 6=y, 5=z, 4=w)
-//   Low nibble (BBBB):  Which destination elements receive the result
-//
-// 0xEF = 0b11101111: Dot product of elements y,z,w (bits 765 set), result to all (bits 3210 set)
-//        This computes dot(yzw) due to guest->host vector element reversal.
-// 0xFF = 0b11111111: Full 4-element dot product, result broadcast to all elements
-//
 // === Floating-Point Sign Bit ===
 // 0x80000000: IEEE 754 sign bit mask for 32-bit float
 //             Used for negation via XOR and sign extraction
@@ -93,80 +83,69 @@ bool build_vmulfp128(BuilderContext& ctx) {
 bool build_vmaddfp(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(true);
   ctx.println(
-      "\tsimde_mm_store_ps({}.f32, simde_mm_add_ps(simde_mm_mul_ps(simde_mm_load_ps({}.f32), "
-      "simde_mm_load_ps({}.f32)), simde_mm_load_ps({}.f32)));",
+      "\tsimde_mm_store_ps({}.f32, simde_mm_add_ps("
+      "simde_mm_mul_ps(simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32)), "
+      "simde_mm_load_ps({}.f32)));",
       ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]),
       ctx.v(ctx.insn.operands[3]));
   return true;
 }
 
 bool build_vnmsubfp(BuilderContext& ctx) {
-  // vnmsubfp: vD = -(vA * vB - vC) - negation done by XOR with sign bit (0x80000000)
   ctx.emit_set_flush_mode(true);
   ctx.println(
-      "\tsimde_mm_store_ps({}.f32, "
-      "simde_mm_xor_ps(simde_mm_sub_ps(simde_mm_mul_ps(simde_mm_load_ps({}.f32), "
-      "simde_mm_load_ps({}.f32)), simde_mm_load_ps({}.f32)), "
-      "simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)))));",
-      ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]),
-      ctx.v(ctx.insn.operands[3]));
+      "\tsimde_mm_store_ps({}.f32, simde_mm_sub_ps("
+      "simde_mm_load_ps({}.f32), "
+      "simde_mm_mul_ps(simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32))));",
+      ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[3]), ctx.v(ctx.insn.operands[1]),
+      ctx.v(ctx.insn.operands[2]));
   return true;
 }
 
 bool build_vmaxfp(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(true);
-  ctx.emit_vec_fp_binary("max");
+  ctx.println(
+      "\tsimde_mm_store_ps({}.f32, simde_mm_max_ps(simde_mm_load_ps({}.f32), "
+      "simde_mm_load_ps({}.f32)));",
+      ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]));
   return true;
 }
 
 bool build_vminfp(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(true);
-  ctx.emit_vec_fp_binary("min");
+  ctx.println(
+      "\tsimde_mm_store_ps({}.f32, simde_mm_min_ps(simde_mm_load_ps({}.f32), "
+      "simde_mm_load_ps({}.f32)));",
+      ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]));
   return true;
 }
 
 bool build_vrefp(BuilderContext& ctx) {
-  // TODO: see if we can use rcp safely
+  // Match Xenia's OPCODE_RECIP lowering. Xenia intentionally avoids rcpps here:
+  // the x86 estimate is less accurate than Altivec's vrefp guarantee and is
+  // known to break collision-sensitive paths in other titles.
   ctx.emit_set_flush_mode(true);
-  ctx.emit_vec_fp_unary_expr("simde_mm_div_ps(simde_mm_set1_ps(1), simde_mm_load_ps({vA}.f32))");
+  ctx.emit_vec_fp_unary_expr("simde_mm_div_ps(simde_mm_set1_ps(1.0f), simde_mm_load_ps({vA}.f32))");
   return true;
 }
 
 bool build_vrsqrtefp(BuilderContext& ctx) {
-  // TODO: see if we can use rsqrt safely
+  // Match Xenia's OPCODE_RSQRT lowering. The x86 estimate is not accurate
+  // enough for collision-sensitive code, so use sqrt + divide.
   ctx.emit_set_flush_mode(true);
   ctx.emit_vec_fp_unary_expr(
-      "simde_mm_div_ps(simde_mm_set1_ps(1), simde_mm_sqrt_ps(simde_mm_load_ps({vA}.f32)))");
+      "simde_mm_div_ps(simde_mm_set1_ps(1.0f), simde_mm_sqrt_ps(simde_mm_load_ps({vA}.f32)))");
   return true;
 }
 
 bool build_vexptefp(BuilderContext& ctx) {
-  // SIMD exp2 estimate (~12-bit precision, matching PPC vexptefp spec)
-  // Algorithm: exp2(x) = 2^n * poly(f), where n = floor(x), f = x - n
-  auto vD = ctx.v(ctx.insn.operands[0]);
-  auto vA = ctx.v(ctx.insn.operands[1]);
+  // Xenia's x64 backend lowers the corresponding POW2 vector opcode through
+  // std::exp2 rather than a hardware estimate. Match that behavior so traces
+  // compare against the emulator reference instead of PPC-estimate accuracy.
   ctx.emit_set_flush_mode(true);
-  ctx.println("\t{{");
-  ctx.println("\t\tsimde__m128 x = simde_mm_load_ps({}.f32);", vA);
-  ctx.println(
-      "\t\tsimde__m128 n = simde_mm_round_ps(x, "
-      "SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);");
-  ctx.println("\t\tsimde__m128 f = simde_mm_sub_ps(x, n);");
-  // 4th-order minimax polynomial for 2^f, f in [0,1), ~12-bit accuracy
-  ctx.println("\t\tsimde__m128 p = simde_mm_set1_ps(1.8775767e-3f);");
-  ctx.println("\t\tp = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(8.9893397e-3f));");
-  ctx.println("\t\tp = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(5.5826318e-2f));");
-  ctx.println("\t\tp = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(2.4015361e-1f));");
-  ctx.println("\t\tp = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(6.9315308e-1f));");
-  ctx.println("\t\tp = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(1.0f));");
-  // Construct 2^n by adding n to the IEEE 754 exponent bias and shifting into place
-  ctx.println("\t\tsimde__m128i exp_bits = simde_mm_slli_epi32(");
-  ctx.println("\t\t\tsimde_mm_add_epi32(simde_mm_cvttps_epi32(n), simde_mm_set1_epi32(127)), 23);");
-  ctx.println(
-      "\t\tsimde_mm_store_ps({}.f32, "
-      "simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits)));",
-      vD);
-  ctx.println("\t}}");
+  for (size_t i = 0; i < 4; i++)
+    ctx.println("\t{}.f32[{}] = exp2f({}.f32[{}]);", ctx.v(ctx.insn.operands[0]), i,
+                ctx.v(ctx.insn.operands[1]), i);
   return true;
 }
 
@@ -184,22 +163,19 @@ bool build_vlogefp(BuilderContext& ctx) {
 //=============================================================================
 
 bool build_vmsum3fp128(BuilderContext& ctx) {
-  // 3-element dot product accounting for guest->host vector element reversal
-  // 0xEF = dot(yzw) with result broadcast to all elements (see constants doc)
   ctx.emit_set_flush_mode(true);
   ctx.println(
-      "\tsimde_mm_store_ps({}.f32, simde_mm_dp_ps(simde_mm_load_ps({}.f32), "
-      "simde_mm_load_ps({}.f32), 0xEF));",
+      "\tsimde_mm_store_ps({}.f32, rex::ppc::simde_mm_vmsum3fp128_ps("
+      "simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32)));",
       ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]));
   return true;
 }
 
 bool build_vmsum4fp128(BuilderContext& ctx) {
-  // 4-element dot product: 0xFF = all 4 elements, result to all (see constants doc)
   ctx.emit_set_flush_mode(true);
   ctx.println(
-      "\tsimde_mm_store_ps({}.f32, simde_mm_dp_ps(simde_mm_load_ps({}.f32), "
-      "simde_mm_load_ps({}.f32), 0xFF));",
+      "\tsimde_mm_store_ps({}.f32, rex::ppc::simde_mm_vmsum4fp128_ps("
+      "simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32)));",
       ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]));
   return true;
 }
@@ -250,7 +226,25 @@ bool build_vaddsbs(BuilderContext& ctx) {
 }
 
 bool build_vaddshs(BuilderContext& ctx) {
-  ctx.emit_vec_int_binary("adds_epi16", "s16");
+  auto vD = ctx.v(ctx.insn.operands[0]);
+  auto vA = ctx.v(ctx.insn.operands[1]);
+  auto vB = ctx.v(ctx.insn.operands[2]);
+
+  ctx.println("\t{{");
+  ctx.println("\t\tfor (int i = 0; i < 8; ++i) {{");
+  ctx.println("\t\t\tint32_t sum = static_cast<int32_t>({}.s16[i]) + static_cast<int32_t>({}.s16[i]);", vA,
+              vB);
+  ctx.println("\t\t\tif (sum > 32767) {{");
+  ctx.println("\t\t\t\t{}.s16[i] = 32767;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else if (sum < -32768) {{");
+  ctx.println("\t\t\t\t{}.s16[i] = -32768;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else {{");
+  ctx.println("\t\t\t\t{}.s16[i] = static_cast<int16_t>(sum);", vD);
+  ctx.println("\t\t\t}}");
+  ctx.println("\t\t}}");
+  ctx.println("\t}}");
   return true;
 }
 
@@ -261,25 +255,19 @@ bool build_vaddsws(BuilderContext& ctx) {
   auto vB = ctx.v(ctx.insn.operands[2]);
 
   ctx.println("\t{{");
-  // No direct SSE intrinsic, so use overflow detection and blend
-  ctx.println("\t\tsimde__m128i a = simde_mm_load_si128((simde__m128i*){}.u8);", vA);
-  ctx.println("\t\tsimde__m128i b = simde_mm_load_si128((simde__m128i*){}.u8);", vB);
-  ctx.println("\t\tsimde__m128i sum = simde_mm_add_epi32(a, b);");
-  // Overflow if: (a ^ sum) & (b ^ sum) has MSB set (signs of a,b match but sum differs)
-  ctx.println(
-      "\t\tsimde__m128i overflow = simde_mm_and_si128(simde_mm_xor_si128(a, sum), "
-      "simde_mm_xor_si128(b, sum));");
-  // Saturation value: if a positive (MSB=0), use INT32_MAX;
-  // if negative, use INT32_MIN (a >> 31) gives all 1s if negative, all 0s
-  // if positive XOR with 0x7FFFFFFF: negative -> 0x80000000, positive -> 0x7FFFFFFF
-  ctx.println(
-      "\t\tsimde__m128i sat_val = simde_mm_xor_si128(simde_mm_srai_epi32(a, 31), "
-      "simde_mm_set1_epi32(0x7FFFFFFF));");
-  // Blend: select sat_val where overflow MSB is set, else sum
-  ctx.println(
-      "\t\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_blendv_epi8(sum, sat_val, "
-      "overflow));",
-      vD);
+  ctx.println("\t\tfor (int i = 0; i < 4; ++i) {{");
+  ctx.println("\t\t\tlong long sum = static_cast<long long>({}.s32[i]) + static_cast<long long>({}.s32[i]);", vA,
+              vB);
+  ctx.println("\t\t\tif (sum > 2147483647LL) {{");
+  ctx.println("\t\t\t\t{}.s32[i] = 2147483647;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else if (sum < (-2147483647LL - 1LL)) {{");
+  ctx.println("\t\t\t\t{}.s32[i] = -2147483647 - 1;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else {{");
+  ctx.println("\t\t\t\t{}.s32[i] = static_cast<int32_t>(sum);", vD);
+  ctx.println("\t\t\t}}");
+  ctx.println("\t\t}}");
   ctx.println("\t}}");
   return true;
 }
@@ -318,13 +306,187 @@ bool build_vadduhs(BuilderContext& ctx) {
   return true;
 }
 
+bool build_vmhaddshs(BuilderContext& ctx) {
+  auto vD = ctx.v(ctx.insn.operands[0]);
+  auto vA = ctx.v(ctx.insn.operands[1]);
+  auto vB = ctx.v(ctx.insn.operands[2]);
+  auto vC = ctx.v(ctx.insn.operands[3]);
+
+  ctx.println("\t{{");
+  ctx.println("\t\tfor (int i = 0; i < 8; ++i) {{");
+  ctx.println("\t\t\tint32_t value = ((static_cast<int32_t>({}.s16[i]) * static_cast<int32_t>({}.s16[i])) >> 15) + static_cast<int32_t>({}.s16[i]);", vA,
+              vB, vC);
+  ctx.println("\t\t\tif (value > 32767) {{");
+  ctx.println("\t\t\t\t{}.s16[i] = 32767;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else if (value < -32768) {{");
+  ctx.println("\t\t\t\t{}.s16[i] = -32768;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else {{");
+  ctx.println("\t\t\t\t{}.s16[i] = static_cast<int16_t>(value);", vD);
+  ctx.println("\t\t\t}}");
+  ctx.println("\t\t}}");
+  ctx.println("\t}}");
+  return true;
+}
+
+bool build_vmhraddshs(BuilderContext& ctx) {
+  auto vD = ctx.v(ctx.insn.operands[0]);
+  auto vA = ctx.v(ctx.insn.operands[1]);
+  auto vB = ctx.v(ctx.insn.operands[2]);
+  auto vC = ctx.v(ctx.insn.operands[3]);
+
+  ctx.println("\t{{");
+  ctx.println("\t\tfor (int i = 0; i < 8; ++i) {{");
+  ctx.println("\t\t\tint32_t value = (((static_cast<int32_t>({}.s16[i]) * static_cast<int32_t>({}.s16[i])) + 0x4000) >> 15) + static_cast<int32_t>({}.s16[i]);", vA,
+              vB, vC);
+  ctx.println("\t\t\tif (value > 32767) {{");
+  ctx.println("\t\t\t\t{}.s16[i] = 32767;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else if (value < -32768) {{");
+  ctx.println("\t\t\t\t{}.s16[i] = -32768;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else {{");
+  ctx.println("\t\t\t\t{}.s16[i] = static_cast<int16_t>(value);", vD);
+  ctx.println("\t\t\t}}");
+  ctx.println("\t\t}}");
+  ctx.println("\t}}");
+  return true;
+}
+
+bool build_vmladduhm(BuilderContext& ctx) {
+  auto vD = ctx.v(ctx.insn.operands[0]);
+  auto vA = ctx.v(ctx.insn.operands[1]);
+  auto vB = ctx.v(ctx.insn.operands[2]);
+  auto vC = ctx.v(ctx.insn.operands[3]);
+
+  for (int i = 0; i < 8; ++i) {
+    ctx.println("\t{}.u16[{}] = static_cast<uint16_t>((static_cast<uint32_t>({}.u16[{}]) * static_cast<uint32_t>({}.u16[{}])) + static_cast<uint32_t>({}.u16[{}]));",
+                vD, i, vA, i, vB, i, vC, i);
+  }
+  return true;
+}
+
+bool build_vmsumubm(BuilderContext& ctx) {
+  auto vD = ctx.v(ctx.insn.operands[0]);
+  auto vA = ctx.v(ctx.insn.operands[1]);
+  auto vB = ctx.v(ctx.insn.operands[2]);
+  auto vC = ctx.v(ctx.insn.operands[3]);
+
+  for (int i = 0; i < 4; ++i) {
+    const int b = i * 4;
+    ctx.println("\t{}.u32[{}] = {}.u32[{}] + static_cast<uint32_t>({}.u8[{}]) * static_cast<uint32_t>({}.u8[{}]) + static_cast<uint32_t>({}.u8[{}]) * static_cast<uint32_t>({}.u8[{}]) + static_cast<uint32_t>({}.u8[{}]) * static_cast<uint32_t>({}.u8[{}]) + static_cast<uint32_t>({}.u8[{}]) * static_cast<uint32_t>({}.u8[{}]);",
+                vD, i, vC, i, vA, b, vB, b, vA, b + 1, vB, b + 1, vA, b + 2, vB, b + 2, vA, b + 3,
+                vB, b + 3);
+  }
+  return true;
+}
+
+bool build_vmsummbm(BuilderContext& ctx) {
+  auto vD = ctx.v(ctx.insn.operands[0]);
+  auto vA = ctx.v(ctx.insn.operands[1]);
+  auto vB = ctx.v(ctx.insn.operands[2]);
+  auto vC = ctx.v(ctx.insn.operands[3]);
+
+  for (int i = 0; i < 4; ++i) {
+    const int b = i * 4;
+    ctx.println("\t{}.u32[{}] = static_cast<uint32_t>(static_cast<int64_t>({}.s32[{}]) + static_cast<int64_t>({}.s8[{}]) * static_cast<int64_t>({}.u8[{}]) + static_cast<int64_t>({}.s8[{}]) * static_cast<int64_t>({}.u8[{}]) + static_cast<int64_t>({}.s8[{}]) * static_cast<int64_t>({}.u8[{}]) + static_cast<int64_t>({}.s8[{}]) * static_cast<int64_t>({}.u8[{}]));",
+                vD, i, vC, i, vA, b, vB, b, vA, b + 1, vB, b + 1, vA, b + 2, vB, b + 2, vA, b + 3,
+                vB, b + 3);
+  }
+  return true;
+}
+
+bool build_vmsumuhm(BuilderContext& ctx) {
+  auto vD = ctx.v(ctx.insn.operands[0]);
+  auto vA = ctx.v(ctx.insn.operands[1]);
+  auto vB = ctx.v(ctx.insn.operands[2]);
+  auto vC = ctx.v(ctx.insn.operands[3]);
+
+  for (int i = 0; i < 4; ++i) {
+    const int h = i * 2;
+    ctx.println("\t{}.u32[{}] = {}.u32[{}] + static_cast<uint32_t>({}.u16[{}]) * static_cast<uint32_t>({}.u16[{}]) + static_cast<uint32_t>({}.u16[{}]) * static_cast<uint32_t>({}.u16[{}]);",
+                vD, i, vC, i, vA, h, vB, h, vA, h + 1, vB, h + 1);
+  }
+  return true;
+}
+
+bool build_vmsumuhs(BuilderContext& ctx) {
+  auto vD = ctx.v(ctx.insn.operands[0]);
+  auto vA = ctx.v(ctx.insn.operands[1]);
+  auto vB = ctx.v(ctx.insn.operands[2]);
+  auto vC = ctx.v(ctx.insn.operands[3]);
+
+  ctx.println("\t{{");
+  ctx.println("\t\tfor (int i = 0; i < 4; ++i) {{");
+  ctx.println("\t\t\tint h = i * 2;");
+  ctx.println("\t\t\tuint64_t value = static_cast<uint64_t>({}.u32[i]) + static_cast<uint64_t>({}.u16[h]) * static_cast<uint64_t>({}.u16[h]) + static_cast<uint64_t>({}.u16[h + 1]) * static_cast<uint64_t>({}.u16[h + 1]);",
+              vC, vA, vB, vA, vB);
+  ctx.println("\t\t\tif (value > 0xFFFFFFFFULL) {{");
+  ctx.println("\t\t\t\t{}.u32[i] = 0xFFFFFFFFu;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else {{");
+  ctx.println("\t\t\t\t{}.u32[i] = static_cast<uint32_t>(value);", vD);
+  ctx.println("\t\t\t}}");
+  ctx.println("\t\t}}");
+  ctx.println("\t}}");
+  return true;
+}
+
+bool build_vmsumshm(BuilderContext& ctx) {
+  auto vD = ctx.v(ctx.insn.operands[0]);
+  auto vA = ctx.v(ctx.insn.operands[1]);
+  auto vB = ctx.v(ctx.insn.operands[2]);
+  auto vC = ctx.v(ctx.insn.operands[3]);
+
+  for (int i = 0; i < 4; ++i) {
+    const int h = i * 2;
+    ctx.println("\t{}.u32[{}] = static_cast<uint32_t>(static_cast<int64_t>({}.s32[{}]) + static_cast<int64_t>({}.s16[{}]) * static_cast<int64_t>({}.s16[{}]) + static_cast<int64_t>({}.s16[{}]) * static_cast<int64_t>({}.s16[{}]));",
+                vD, i, vC, i, vA, h, vB, h, vA, h + 1, vB, h + 1);
+  }
+  return true;
+}
+
+bool build_vmsumshs(BuilderContext& ctx) {
+  auto vD = ctx.v(ctx.insn.operands[0]);
+  auto vA = ctx.v(ctx.insn.operands[1]);
+  auto vB = ctx.v(ctx.insn.operands[2]);
+  auto vC = ctx.v(ctx.insn.operands[3]);
+
+  ctx.println("\t{{");
+  ctx.println("\t\tfor (int i = 0; i < 4; ++i) {{");
+  ctx.println("\t\t\tint h = i * 2;");
+  ctx.println("\t\t\tint64_t value = static_cast<int64_t>({}.s32[i]) + static_cast<int64_t>({}.s16[h]) * static_cast<int64_t>({}.s16[h]) + static_cast<int64_t>({}.s16[h + 1]) * static_cast<int64_t>({}.s16[h + 1]);",
+              vC, vA, vB, vA, vB);
+  ctx.println("\t\t\tif (value > 2147483647LL) {{");
+  ctx.println("\t\t\t\t{}.s32[i] = 2147483647;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else if (value < (-2147483647LL - 1LL)) {{");
+  ctx.println("\t\t\t\t{}.s32[i] = -2147483647 - 1;", vD);
+  ctx.println("\t\t\t\tctx.vscr_sat = 1;");
+  ctx.println("\t\t\t}} else {{");
+  ctx.println("\t\t\t\t{}.s32[i] = static_cast<int32_t>(value);", vD);
+  ctx.println("\t\t\t}}");
+  ctx.println("\t\t}}");
+  ctx.println("\t}}");
+  return true;
+}
+
 bool build_vsubsws(BuilderContext& ctx) {
   // TODO: vectorize
   for (size_t i = 0; i < 4; i++) {
     ctx.println("\t{}.s64 = int64_t({}.s32[{}]) - int64_t({}.s32[{}]);", ctx.temp(),
                 ctx.v(ctx.insn.operands[1]), i, ctx.v(ctx.insn.operands[2]), i);
-    ctx.println("\t{}.s32[{}] = {}.s64 > INT_MAX ? INT_MAX : {}.s64 < INT_MIN ? INT_MIN : {}.s64;",
-                ctx.v(ctx.insn.operands[0]), i, ctx.temp(), ctx.temp(), ctx.temp());
+    ctx.println("\tif ({}.s64 > INT_MAX) {{", ctx.temp());
+    ctx.println("\t\t{}.s32[{}] = INT_MAX;", ctx.v(ctx.insn.operands[0]), i);
+    ctx.println("\t\tctx.vscr_sat = 1;");
+    ctx.println("\t}} else if ({}.s64 < INT_MIN) {{", ctx.temp());
+    ctx.println("\t\t{}.s32[{}] = INT_MIN;", ctx.v(ctx.insn.operands[0]), i);
+    ctx.println("\t\tctx.vscr_sat = 1;");
+    ctx.println("\t}} else {{");
+    ctx.println("\t\t{}.s32[{}] = static_cast<int32_t>({}.s64);", ctx.v(ctx.insn.operands[0]), i,
+                ctx.temp());
+    ctx.println("\t}}");
   }
   return true;
 }
@@ -566,9 +728,10 @@ bool build_vcmpbfp(BuilderContext& ctx) {
       "\tsimde_mm_store_ps({}.f32, simde_mm_and_ps(simde_mm_cmpgt_ps(simde_mm_load_ps({}.f32), "
       "simde_mm_load_ps({}.f32)), simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)))));",
       ctx.v_temp(), vA, vB);
-  // lt_neg_mask = (vA < -vB) & 0x40000000
+  // lt_neg_mask = !(vA >= -vB) & 0x40000000. This intentionally treats
+  // unordered lanes as out-of-bounds, matching Xenia's vcmpbfp lowering.
   ctx.println(
-      "\tsimde_mm_store_ps({}.f32, simde_mm_and_ps(simde_mm_cmplt_ps(simde_mm_load_ps({}.f32), "
+      "\tsimde_mm_store_ps({}.f32, simde_mm_andnot_ps(simde_mm_cmpge_ps(simde_mm_load_ps({}.f32), "
       "simde_mm_xor_ps(simde_mm_load_ps({}.f32), "
       "simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000))))), "
       "simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x40000000)))));",
@@ -1238,7 +1401,7 @@ bool build_vpkd3d128(BuilderContext& ctx) {
 
       // Pack x (10 bits, position 0-9) - Guest element 0 is at index 3
       ctx.println(
-          "\t{}.f32 = {}.f32[3] < kPack2101010_Min10 ? kPack2101010_Min10 : ({}.f32[3] > "
+          "\t{}.f32 = !({}.f32[3] >= kPack2101010_Min10) ? kPack2101010_Min10 : ({}.f32[3] > "
           "kPack2101010_Max10 ? kPack2101010_Max10 : {}.f32[3]);",
           ctx.temp(), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[1]),
           ctx.v(ctx.insn.operands[1]));
@@ -1246,7 +1409,7 @@ bool build_vpkd3d128(BuilderContext& ctx) {
 
       // Pack y (10 bits, position 10-19) - Guest element 1 is at index 2
       ctx.println(
-          "\t{}.f32 = {}.f32[2] < kPack2101010_Min10 ? kPack2101010_Min10 : ({}.f32[2] > "
+          "\t{}.f32 = !({}.f32[2] >= kPack2101010_Min10) ? kPack2101010_Min10 : ({}.f32[2] > "
           "kPack2101010_Max10 ? kPack2101010_Max10 : {}.f32[2]);",
           ctx.temp(), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[1]),
           ctx.v(ctx.insn.operands[1]));
@@ -1254,7 +1417,7 @@ bool build_vpkd3d128(BuilderContext& ctx) {
 
       // Pack z (10 bits, position 20-29) - Guest element 2 is at index 1
       ctx.println(
-          "\t{}.f32 = {}.f32[1] < kPack2101010_Min10 ? kPack2101010_Min10 : ({}.f32[1] > "
+          "\t{}.f32 = !({}.f32[1] >= kPack2101010_Min10) ? kPack2101010_Min10 : ({}.f32[1] > "
           "kPack2101010_Max10 ? kPack2101010_Max10 : {}.f32[1]);",
           ctx.temp(), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[1]),
           ctx.v(ctx.insn.operands[1]));
@@ -1262,7 +1425,7 @@ bool build_vpkd3d128(BuilderContext& ctx) {
 
       // Pack w (2 bits, position 30-31) - Guest element 3 is at index 0
       ctx.println(
-          "\t{}.f32 = {}.f32[0] < kPack2101010_Min2 ? kPack2101010_Min2 : ({}.f32[0] > "
+          "\t{}.f32 = !({}.f32[0] >= kPack2101010_Min2) ? kPack2101010_Min2 : ({}.f32[0] > "
           "kPack2101010_Max2 ? kPack2101010_Max2 : {}.f32[0]);",
           ctx.temp(), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[1]),
           ctx.v(ctx.insn.operands[1]));
@@ -1282,21 +1445,8 @@ bool build_vpkd3d128(BuilderContext& ctx) {
         size_t srcIdx = 3 - i;  // Guest element i is at host array index 3-i
         size_t dstIdx =
             (1 - i) + (2 * ctx.insn.operands[4]);  // Output reversed: elem 0 to high, elem 1 to low
-        ctx.println("\t{}.u32 = ({}.u32[{}]&0x7FFFFFFF);", ctx.temp(), ctx.v(ctx.insn.operands[1]),
-                    srcIdx);
-        ctx.println(
-            "\t{0}.u8[0] = ({1}.f32 != {1}.f32) || ({1}.f32 > 65504.0f) ? 0xFF : "
-            "(({2}.u32[{3}]&0x7f800000)>>23);",
-            ctx.v_temp(), ctx.temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
-        ctx.println("\t{}.u16 = {}.u8[0] != 0xFF ? (({}.u32[{}]&0x7FE000)>>13) : 0x0;", ctx.temp(),
-                    ctx.v_temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
-        ctx.println(
-            "\t{0}.u16[{1}] = {2}.u8[0] != 0xFF ? ({2}.u8[0] > 0x70 ? "
-            "((({2}.u8[0]-0x70)<<10)+{3}.u16) : (0x71-{2}.u8[0] > 31 ? 0x0 : "
-            "((0x400+{3}.u16)>>(0x71-{2}.u8[0])))) : 0x7FFF;",
-            ctx.v(ctx.insn.operands[0]), dstIdx, ctx.v_temp(), ctx.temp());
-        ctx.println("\t{}.u16[{}] |= (({}.u32[{}]&0x80000000)>>16);", ctx.v(ctx.insn.operands[0]),
-                    dstIdx, ctx.v(ctx.insn.operands[1]), srcIdx);
+        ctx.println("\t{}.u16[{}] = rex::float_to_xenos_half({}.f32[{}]);",
+                    ctx.v(ctx.insn.operands[0]), dstIdx, ctx.v(ctx.insn.operands[1]), srcIdx);
       }
       break;
     }
@@ -1321,20 +1471,16 @@ bool build_vpkd3d128(BuilderContext& ctx) {
 
     case 5:  // float16_4
     {
-      // NOTE: These combinations come from game traces (heuristic handling), not the official spec.
-      // The spec only defines the encoding, not the exact semantics of y (mask) and z (shift) here.
-      // Anyone reading this later should know it may need extending if new combos turn up in other
-      // games. Combinations observed so far: mask=2, shift=0 → write u16[3..0], zero u16[4..7]
-      // mask=2, shift=2 → write u16[7..4], zero u16[3..0] (first pass)
-      // mask=3, shift=0 → write u16[3..0] without zeroing (second pass, preserves the upper half)
+      // The instruction tests and Skate 3's two-pass packing both rely on untouched lanes being
+      // preserved; clearing the opposite half corrupts previously packed float16_4 data.
 
       uint32_t mask = ctx.insn.operands[3];
       uint32_t shift = ctx.insn.operands[4];
 
       // Guard fix: The shift bound was too loose (shift=3 would cause dstIdx to reach 9, an OOB
-      // store). We also explicitly reject shift == 1 since the clear block below only handles 0
-      // and 2. Furthermore, we explicitly warn on unexpected mask values (e.g., 0, 1) to avoid
-      // silent fallthroughs and silently generating miscompiled code.
+      // store). We also explicitly reject shift == 1 because only the lower and upper half
+      // placements are currently understood. Furthermore, we explicitly warn on unexpected mask
+      // values (e.g., 0, 1) to avoid silent fallthroughs and silently generating miscompiled code.
       if ((shift != 0 && shift != 2) || (mask != 2 && mask != 3)) {
         REXCODEGEN_WARN("Unexpected float16_4 pack instruction at {:X} (mask={}, shift={})",
                         ctx.base, mask, shift);
@@ -1343,39 +1489,15 @@ bool build_vpkd3d128(BuilderContext& ctx) {
         return true;
       }
 
-      // mask=2: before writing, clear the half that will NOT be written.
-      // Shift is guaranteed to be 0 or 2 at this point due to the guard above.
-      if (mask == 2) {
-        // Optimization: Emit a single u64 write instead of two u32 writes.
-        // shift=0 → clears upper half u64[1]
-        // shift=2 → clears lower half u64[0]
-        size_t clearU64Start = (shift == 0) ? 1 : 0;
-        ctx.println("\t{}.u64[{}] = 0;", ctx.v(ctx.insn.operands[0]), clearU64Start);
-      }
-
-      // Invariant: dstIdx must stay under 8 (valid u16 lanes are 0..7).
-      // Capping the shift to 0 or 2 in the guard check above ensures this is safe:
-      // it restricts the max dstIdx to (3 - 0) + (2 * 2) = 7.
-      // Do not widen the shift bounds without adjusting this logic.
+      // Preserve untouched lanes; paired float16_4 packs fill lower/upper halves separately.
+      // Guest element order is reversed in Rex's host storage, but each packed half keeps
+      // element 0 in the high halfword and element 1 in the low halfword.
       for (size_t i = 0; i < 4; i++) {
         size_t srcIdx = 3 - i;
         size_t dstIdx = (3 - i) + (2 * shift);
 
-        ctx.println("\t{}.u32 = ({}.u32[{}]&0x7FFFFFFF);", ctx.temp(), ctx.v(ctx.insn.operands[1]),
-                    srcIdx);
-        ctx.println(
-            "\t{0}.u8[0] = ({1}.f32 != {1}.f32) || ({1}.f32 > 65504.0f) ? 0xFF : "
-            "(({2}.u32[{3}]&0x7f800000)>>23);",
-            ctx.v_temp(), ctx.temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
-        ctx.println("\t{}.u16 = {}.u8[0] != 0xFF ? (({}.u32[{}]&0x7FE000)>>13) : 0x0;", ctx.temp(),
-                    ctx.v_temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
-        ctx.println(
-            "\t{0}.u16[{1}] = {2}.u8[0] != 0xFF ? ({2}.u8[0] > 0x70 ? "
-            "((({2}.u8[0]-0x70)<<10)+{3}.u16) : (0x71-{2}.u8[0] > 31 ? 0x0 : "
-            "((0x400+{3}.u16)>>(0x71-{2}.u8[0])))) : 0x7FFF;",
-            ctx.v(ctx.insn.operands[0]), dstIdx, ctx.v_temp(), ctx.temp());
-        ctx.println("\t{}.u16[{}] |= (({}.u32[{}]&0x80000000)>>16);", ctx.v(ctx.insn.operands[0]),
-                    dstIdx, ctx.v(ctx.insn.operands[1]), srcIdx);
+        ctx.println("\t{}.u16[{}] = rex::float_to_xenos_half({}.f32[{}], false, true);",
+                    ctx.v(ctx.insn.operands[0]), dstIdx, ctx.v(ctx.insn.operands[1]), srcIdx);
       }
       break;
     }
@@ -1429,7 +1551,8 @@ bool build_vupkd3d128(BuilderContext& ctx) {
       for (size_t i = 0; i < 2; i++) {
         ctx.println("\t{}.f32 = 3.0f;", ctx.temp());
         ctx.println("\t{}.s32 += {}.s16[{}];", ctx.temp(), ctx.v(ctx.insn.operands[1]), 1 - i);
-        ctx.println("\t{}.f32[{}] = {}.f32;", ctx.v_temp(), 3 - i, ctx.temp());
+        ctx.println("\t{}.u32[{}] = {}.u32 == 0x403F8000u ? 0x7FC00000u : {}.u32;",
+                    ctx.v_temp(), 3 - i, ctx.temp(), ctx.temp());
       }
       ctx.println("\t{}.f32[1] = 0.0f;", ctx.v_temp());
       ctx.println("\t{}.f32[0] = 1.0f;", ctx.v_temp());
@@ -1451,11 +1574,13 @@ bool build_vupkd3d128(BuilderContext& ctx) {
       ctx.println("\t{}.u32[3] = {}.u32[0];", vDst, ctx.v_temp());
       // y (bits 10-19) - sign extend from 10 bits --> Guest element 1 (host u32[2])
       ctx.println("\t{}.s32 = ({}.s32[0] << 12) >> 22;", ctx.temp(), vSrc);
-      ctx.println("\t{}.s32[0] = {}.s32 + 0x40400000;", ctx.v_temp(), ctx.temp());
+      ctx.println("\t{}.s32[0] = {}.s32 == -512 ? 0x7FC00000 : ({}.s32 + 0x40400000);",
+                  ctx.v_temp(), ctx.temp(), ctx.temp());
       ctx.println("\t{}.u32[2] = {}.u32[0];", vDst, ctx.v_temp());
       // z (bits 20-29) - sign extend from 10 bits --> Guest element 2 (host u32[1])
       ctx.println("\t{}.s32 = ({}.s32[0] << 2) >> 22;", ctx.temp(), vSrc);
-      ctx.println("\t{}.s32[0] = {}.s32 + 0x40400000;", ctx.v_temp(), ctx.temp());
+      ctx.println("\t{}.s32[0] = {}.s32 == -512 ? 0x7FC00000 : ({}.s32 + 0x40400000);",
+                  ctx.v_temp(), ctx.temp(), ctx.temp());
       ctx.println("\t{}.u32[1] = {}.u32[0];", vDst, ctx.v_temp());
       // w (bits 30-31) - 2 bits, convert to 1.0+w form --> Guest element 3 (host u32[0])
       ctx.println("\t{}.u32[0] = ({}.u32[0] >> 30) | 0x3F800000;", ctx.v_temp(), vSrc);
@@ -1472,16 +1597,8 @@ bool build_vupkd3d128(BuilderContext& ctx) {
       for (size_t i = 0; i < 2; i++) {
         size_t srcIdx = 1 - i;  // Read from u16[1], u16[0]
         size_t dstIdx = 3 - i;  // Write to u32[3], u32[2]
-        ctx.println("\t{}.u32 = {}.u16[{}];", ctx.temp(), vSrc, srcIdx);
-        // Extract sign, exponent, mantissa
-        ctx.println(
-            "\t{}.u32[0] = (({}.u32 & 0x8000) << 16) | ((({}.u32 & 0x7C00) + 0x1C000) << 13) | "
-            "(({}.u32 & 0x03FF) << 13);",
-            ctx.v_temp(), ctx.temp(), ctx.temp(), ctx.temp());
-        // Handle zero/denorm case
-        ctx.println("\tif (({}.u32 & 0x7C00) == 0) {}.u32[0] = ({}.u32 & 0x8000) << 16;",
-                    ctx.temp(), ctx.v_temp(), ctx.temp());
-        ctx.println("\t{}.u32[{}] = {}.u32[0];", vDst, dstIdx, ctx.v_temp());
+        ctx.println("\t{}.f32[{}] = rex::xenos_half_to_float({}.u16[{}]);", vDst, dstIdx, vSrc,
+                    srcIdx);
       }
       ctx.println("\t{}.f32[1] = 0.0f;", vDst);
       ctx.println("\t{}.f32[0] = 1.0f;", vDst);
@@ -1497,7 +1614,8 @@ bool build_vupkd3d128(BuilderContext& ctx) {
         size_t dstIdx = 3 - i;  // Write to f32 indices 3, 2, 1, 0 (Guest elements 0, 1, 2, 3)
         ctx.println("\t{}.f32 = 3.0f;", ctx.temp());
         ctx.println("\t{}.s32 += {}.s16[{}];", ctx.temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
-        ctx.println("\t{}.f32[{}] = {}.f32;", ctx.v(ctx.insn.operands[0]), dstIdx, ctx.temp());
+        ctx.println("\t{}.u32[{}] = {}.u32 == 0x403F8000u ? 0x7FC00000u : {}.u32;",
+                    ctx.v(ctx.insn.operands[0]), dstIdx, ctx.temp(), ctx.temp());
       }
       break;
     }
@@ -1506,21 +1624,12 @@ bool build_vupkd3d128(BuilderContext& ctx) {
     {
       auto vSrc = ctx.v(ctx.insn.operands[1]);
       auto vDst = ctx.v(ctx.insn.operands[0]);
-      // Unpack 4 float16s from Guest elements 2-3 (host u16[0-3]) to elements 0-3
-      // Guest element order is reversed in host arrays
+      // Read the same halfword order produced by FLOAT16_4 packing.
       for (size_t i = 0; i < 4; i++) {
-        size_t srcIdx = 3 - i;  // Read from u16 indices 3, 2, 1, 0 (guest shorts 0, 1, 2, 3)
+        size_t srcIdx = 3 - i;
         size_t dstIdx = 3 - i;  // Write to u32 indices 3, 2, 1, 0 (Guest elements 0, 1, 2, 3)
-        ctx.println("\t{}.u32 = {}.u16[{}];", ctx.temp(), vSrc, srcIdx);
-        // Extract sign, exponent, mantissa and convert to float32
-        ctx.println(
-            "\t{}.u32[0] = (({}.u32 & 0x8000) << 16) | ((({}.u32 & 0x7C00) + 0x1C000) << 13) | "
-            "(({}.u32 & 0x03FF) << 13);",
-            ctx.v_temp(), ctx.temp(), ctx.temp(), ctx.temp());
-        // Handle zero/denorm case
-        ctx.println("\tif (({}.u32 & 0x7C00) == 0) {}.u32[0] = ({}.u32 & 0x8000) << 16;",
-                    ctx.temp(), ctx.v_temp(), ctx.temp());
-        ctx.println("\t{}.u32[{}] = {}.u32[0];", vDst, dstIdx, ctx.v_temp());
+        ctx.println("\t{}.f32[{}] = rex::xenos_half_to_float({}.u16[{}]);", vDst, dstIdx, vSrc,
+                    srcIdx);
       }
       break;
     }

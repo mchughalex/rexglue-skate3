@@ -88,6 +88,9 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
   if (auto v = toml["project_name"].value<std::string>()) {
     MergeScalar(cfg.projectName, *v, "project_name");
   }
+  if (auto v = toml["symbol_prefix"].value<std::string>()) {
+    MergeScalar(cfg.symbolPrefix, *v, "symbol_prefix");
+  }
   if (auto v = toml["file_path"].value<std::string>()) {
     MergeScalar(cfg.filePath, *v, "file_path");
   }
@@ -485,9 +488,6 @@ bool FinalizeConfig(RecompilerConfig& cfg) {
   }
   for (const auto& error : result.errors) {
     REXCODEGEN_ERROR("[config] {}", error);
-  }
-  if (!result.valid) {
-    ok = false;
   }
   return ok;
 }

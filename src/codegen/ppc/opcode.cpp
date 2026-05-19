@@ -30,7 +30,7 @@ constexpr u32 extract_bits(u32 value, u32 start, u32 count) {
 // Opcode information table
 //=============================================================================
 
-static const std::array<OpcodeInfo, 320> g_opcode_table = {{
+static const std::array<OpcodeInfo, 330> g_opcode_table = {{
     // Primary opcode 16: bcx (conditional branch) - all variants
     {Opcode::bc, InstrFormat::kB, OpcodeGroup::kBranch, "bc", 16, 0, false},
     {Opcode::bca, InstrFormat::kB, OpcodeGroup::kBranch, "bca", 16, 0, false},
@@ -261,8 +261,8 @@ static const std::array<OpcodeInfo, 320> g_opcode_table = {{
     //=========================================================================
     {Opcode::vaddfp, InstrFormat::kX, OpcodeGroup::kVector, "vaddfp", 4, 10, true},
     {Opcode::vsubfp, InstrFormat::kX, OpcodeGroup::kVector, "vsubfp", 4, 74, true},
-    {Opcode::vmaddfp, InstrFormat::kX, OpcodeGroup::kVector, "vmaddfp", 4, 32, true},
-    {Opcode::vnmsubfp, InstrFormat::kX, OpcodeGroup::kVector, "vnmsubfp", 4, 33, true},
+    {Opcode::vmaddfp, InstrFormat::kVA, OpcodeGroup::kVector, "vmaddfp", 4, 46, true},
+    {Opcode::vnmsubfp, InstrFormat::kVA, OpcodeGroup::kVector, "vnmsubfp", 4, 47, true},
     {Opcode::vmaxfp, InstrFormat::kX, OpcodeGroup::kVector, "vmaxfp", 4, 1034, true},
     {Opcode::vminfp, InstrFormat::kX, OpcodeGroup::kVector, "vminfp", 4, 1098, true},
     {Opcode::vrsqrtefp, InstrFormat::kX, OpcodeGroup::kVector, "vrsqrtefp", 4, 330, true},
@@ -279,6 +279,15 @@ static const std::array<OpcodeInfo, 320> g_opcode_table = {{
     {Opcode::vsububm, InstrFormat::kX, OpcodeGroup::kVector, "vsububm", 4, 1024, true},
     {Opcode::vsubuhm, InstrFormat::kX, OpcodeGroup::kVector, "vsubuhm", 4, 1088, true},
     {Opcode::vsubuwm, InstrFormat::kX, OpcodeGroup::kVector, "vsubuwm", 4, 1152, true},
+    {Opcode::vmhaddshs, InstrFormat::kVA, OpcodeGroup::kVector, "vmhaddshs", 4, 32, true},
+    {Opcode::vmhraddshs, InstrFormat::kVA, OpcodeGroup::kVector, "vmhraddshs", 4, 33, true},
+    {Opcode::vmladduhm, InstrFormat::kVA, OpcodeGroup::kVector, "vmladduhm", 4, 34, true},
+    {Opcode::vmsumubm, InstrFormat::kVA, OpcodeGroup::kVector, "vmsumubm", 4, 36, true},
+    {Opcode::vmsummbm, InstrFormat::kVA, OpcodeGroup::kVector, "vmsummbm", 4, 37, true},
+    {Opcode::vmsumuhm, InstrFormat::kVA, OpcodeGroup::kVector, "vmsumuhm", 4, 38, true},
+    {Opcode::vmsumuhs, InstrFormat::kVA, OpcodeGroup::kVector, "vmsumuhs", 4, 39, true},
+    {Opcode::vmsumshm, InstrFormat::kVA, OpcodeGroup::kVector, "vmsumshm", 4, 40, true},
+    {Opcode::vmsumshs, InstrFormat::kVA, OpcodeGroup::kVector, "vmsumshs", 4, 41, true},
     {Opcode::vmuloub, InstrFormat::kX, OpcodeGroup::kVector, "vmuloub", 4, 8, true},
     {Opcode::vmulouh, InstrFormat::kX, OpcodeGroup::kVector, "vmulouh", 4, 72, true},
     {Opcode::vmuleub, InstrFormat::kX, OpcodeGroup::kVector, "vmuleub", 4, 264, true},
@@ -295,7 +304,7 @@ static const std::array<OpcodeInfo, 320> g_opcode_table = {{
     {Opcode::vor, InstrFormat::kX, OpcodeGroup::kVector, "vor", 4, 1156, true},
     {Opcode::vxor, InstrFormat::kX, OpcodeGroup::kVector, "vxor", 4, 1220, true},
     {Opcode::vnor, InstrFormat::kX, OpcodeGroup::kVector, "vnor", 4, 1284, true},
-    {Opcode::vsel, InstrFormat::kX, OpcodeGroup::kVector, "vsel", 4, 42, true},
+    {Opcode::vsel, InstrFormat::kVA, OpcodeGroup::kVector, "vsel", 4, 42, true},
 
     //=========================================================================
     // VMX Compare (Floating-Point)
@@ -324,7 +333,7 @@ static const std::array<OpcodeInfo, 320> g_opcode_table = {{
     //=========================================================================
     // VMX Permute/Merge
     //=========================================================================
-    {Opcode::vperm, InstrFormat::kX, OpcodeGroup::kVector, "vperm", 4, 43, true},
+    {Opcode::vperm, InstrFormat::kVA, OpcodeGroup::kVector, "vperm", 4, 43, true},
     {Opcode::vmrghb, InstrFormat::kX, OpcodeGroup::kVector, "vmrghb", 4, 12, true},
     {Opcode::vmrghh, InstrFormat::kX, OpcodeGroup::kVector, "vmrghh", 4, 76, true},
     {Opcode::vmrghw, InstrFormat::kX, OpcodeGroup::kVector, "vmrghw", 4, 140, true},
@@ -377,6 +386,7 @@ static const std::array<OpcodeInfo, 320> g_opcode_table = {{
     {Opcode::vsr, InstrFormat::kX, OpcodeGroup::kVector, "vsr", 4, 708, true},
     {Opcode::vslo, InstrFormat::kX, OpcodeGroup::kVector, "vslo", 4, 1036, true},
     {Opcode::vsro, InstrFormat::kX, OpcodeGroup::kVector, "vsro", 4, 1100, true},
+    {Opcode::vsldoi, InstrFormat::kVA, OpcodeGroup::kVector, "vsldoi", 4, 44, true},
 
     //=========================================================================
     // VMX Conversion
@@ -802,13 +812,33 @@ Opcode lookup_opcode(u32 code) {
     extended = extract_bits(code, 26, 6);
     switch (extended) {
       case 32:
-        return Opcode::vmaddfp;  // vmaddfp vD, vA, vC, vB
+        return Opcode::vmhaddshs;  // vmhaddshs vD, vA, vB, vC
       case 33:
-        return Opcode::vnmsubfp;  // vnmsubfp vD, vA, vC, vB
+        return Opcode::vmhraddshs;  // vmhraddshs vD, vA, vB, vC
+      case 34:
+        return Opcode::vmladduhm;  // vmladduhm vD, vA, vB, vC
+      case 36:
+        return Opcode::vmsumubm;  // vmsumubm vD, vA, vB, vC
+      case 37:
+        return Opcode::vmsummbm;  // vmsummbm vD, vA, vB, vC
+      case 38:
+        return Opcode::vmsumuhm;  // vmsumuhm vD, vA, vB, vC
+      case 39:
+        return Opcode::vmsumuhs;  // vmsumuhs vD, vA, vB, vC
+      case 40:
+        return Opcode::vmsumshm;  // vmsumshm vD, vA, vB, vC
+      case 41:
+        return Opcode::vmsumshs;  // vmsumshs vD, vA, vB, vC
+      case 42:
+        return Opcode::vsel;  // vsel vD, vA, vB, vC
       case 43:
         return Opcode::vperm;  // vperm vD, vA, vB, vC
       case 44:
-        return Opcode::vsel;  // vsel vD, vA, vB, vC
+        return Opcode::vsldoi;  // vsldoi vD, vA, vB, SHB
+      case 46:
+        return Opcode::vmaddfp;  // vmaddfp vD, vA, vC, vB
+      case 47:
+        return Opcode::vnmsubfp;  // vnmsubfp vD, vA, vC, vB
     }
 
     // Try VX-form (bits 21-31, 11-bit XO)

@@ -267,7 +267,7 @@ inline const char* getStoreMacro(BuilderContext& ctx, const char* normal_macro,
 /**
  * Emit atomic load-and-reserve instruction (lwarx/ldarx pattern).
  *
- * Pattern: EA = rA + rB; reserved = *(T*)REX_RAW_ADDR(EA); rD = bswap(reserved)
+ * Pattern: EA = rA + rB; reserve EA; reserved = *(T*)REX_RAW_ADDR(EA); rD = bswap(reserved)
  *
  * @param ctx The builder context
  * @param ptr_type The pointer type (e.g., "uint32_t", "uint64_t")
@@ -280,8 +280,9 @@ inline void emitAtomicLoadReserve(BuilderContext& ctx, const char* ptr_type, con
   if (ctx.insn.operands[1] != 0)
     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[1]));
   ctx.println("{}.u32;", ctx.r(ctx.insn.operands[2]));
-  ctx.println("\t{}.{} = *({}*)REX_RAW_ADDR({});", ctx.reserved(), reserved_field, ptr_type,
-              ctx.ea());
+  ctx.println("\trex::ppc::AcquireReservation(ctx, {}, sizeof({}));", ctx.ea(), ptr_type);
+  ctx.println("\t{}.{} = *(volatile {}*)REX_RAW_ADDR({});", ctx.reserved(), reserved_field,
+              ptr_type, ctx.ea());
   ctx.println("\t{}.u64 = {}({}.{});", ctx.r(ctx.insn.operands[0]), bswap_func, ctx.reserved(),
               reserved_field);
 }
@@ -289,7 +290,7 @@ inline void emitAtomicLoadReserve(BuilderContext& ctx, const char* ptr_type, con
 /**
  * Emit atomic store-conditional instruction (stwcx./stdcx. pattern).
  *
- * Pattern: EA = rA + rB; cr0 = CAS(EA, reserved, bswap(rS))
+ * Pattern: EA = rA + rB; cr0 = reservation_matches(EA) && CAS(EA, reserved, bswap(rS))
  *
  * @param ctx The builder context
  * @param ptr_type The pointer type (e.g., "uint32_t", "uint64_t")
@@ -305,10 +306,12 @@ inline void emitAtomicStoreConditional(BuilderContext& ctx, const char* ptr_type
   ctx.println("\t{}.lt = 0;", ctx.cr(0));
   ctx.println("\t{}.gt = 0;", ctx.cr(0));
   ctx.println(
-      "\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<{}*>(REX_RAW_ADDR({})), "
+      "\t{}.eq = rex::ppc::ReservationMatches(ctx, {}) && "
+      "__sync_bool_compare_and_swap(reinterpret_cast<{}*>(REX_RAW_ADDR({})), "
       "{}.{}, {}({}.{}));",
-      ctx.cr(0), ptr_type, ctx.ea(), ctx.reserved(), field, bswap_func, ctx.r(ctx.insn.operands[0]),
-      field);
+      ctx.cr(0), ctx.ea(), ptr_type, ctx.ea(), ctx.reserved(), field, bswap_func,
+      ctx.r(ctx.insn.operands[0]), field);
+  ctx.println("\trex::ppc::ReleaseReservation(ctx);");
   ctx.println("\t{}.so = {}.so;", ctx.cr(0), ctx.xer());
 }
 
@@ -387,13 +390,25 @@ inline bool isMMIOUpperBits(uint32_t imm) {
  */
 inline void emitBranchWithBoundsCheck(BuilderContext& ctx, uint32_t target,
                                       std::string_view condition, std::string_view instr_name) {
-  if (target < ctx.fn.base() || target >= ctx.fn.end()) {
-    REXCODEGEN_WARN("{} at {:X} branches outside function to {:X}", instr_name, ctx.base, target);
-    ctx.println("\tif ({}) {{ /* branch to 0x{:X} outside function */ return; }}", condition,
-                target);
-  } else {
+  auto kind = ctx.graph().classifyTarget(target, ctx.fn.base(), false);
+  if (kind == TargetKind::InternalLabel) {
     ctx.println("\tif ({}) goto loc_{:X};", condition, target);
+    return;
   }
+
+  if (auto* targetFn = ctx.graph().getFunction(target)) {
+    REXCODEGEN_WARN("{} at {:X} branches outside function to {:X}", instr_name, ctx.base, target);
+    ctx.println("\tif ({}) {{", condition);
+    ctx.println("\t\t{}(ctx, base);", targetFn->name());
+    ctx.println("\t\treturn;");
+    ctx.println("\t}}");
+    return;
+  }
+
+  REXCODEGEN_WARN("{} at {:X} branches outside function to unresolved {:X}", instr_name,
+                  ctx.base, target);
+  ctx.println("\tif ({}) REX_FATAL(\"Unresolved branch from 0x{:08X} to 0x{:08X}\");",
+              condition, ctx.base, target);
 }
 
 //=============================================================================
