@@ -1017,54 +1017,57 @@ void KernelState::CompleteOverlappedImmediateEx(uint32_t overlapped_ptr, X_RESUL
   CompleteOverlappedEx(overlapped_ptr, result, extended_error, length);
 }
 
-void KernelState::CompleteOverlappedDeferred(std::function<void()> completion_callback,
+void KernelState::CompleteOverlappedDeferred(std::move_only_function<void()> completion_callback,
                                              uint32_t overlapped_ptr, X_RESULT result,
-                                             std::function<void()> pre_callback,
-                                             std::function<void()> post_callback) {
+                                             std::move_only_function<void()> pre_callback,
+                                             std::move_only_function<void()> post_callback) {
   CompleteOverlappedDeferredEx(std::move(completion_callback), overlapped_ptr, result, result, 0,
-                               pre_callback, post_callback);
+                               std::move(pre_callback), std::move(post_callback));
 }
 
-void KernelState::CompleteOverlappedDeferredEx(std::function<void()> completion_callback,
+void KernelState::CompleteOverlappedDeferredEx(std::move_only_function<void()> completion_callback,
                                                uint32_t overlapped_ptr, X_RESULT result,
                                                uint32_t extended_error, uint32_t length,
-                                               std::function<void()> pre_callback,
-                                               std::function<void()> post_callback) {
+                                               std::move_only_function<void()> pre_callback,
+                                               std::move_only_function<void()> post_callback) {
   CompleteOverlappedDeferredEx(
-      [completion_callback, result, extended_error, length](uint32_t& cb_extended_error,
-                                                            uint32_t& cb_length) -> X_RESULT {
+      [completion_callback = std::move(completion_callback), result, extended_error, length](
+          uint32_t& cb_extended_error, uint32_t& cb_length) mutable -> X_RESULT {
         completion_callback();
         cb_extended_error = extended_error;
         cb_length = length;
         return result;
       },
-      overlapped_ptr, pre_callback, post_callback);
+      overlapped_ptr, std::move(pre_callback), std::move(post_callback));
 }
 
-void KernelState::CompleteOverlappedDeferred(std::function<X_RESULT()> completion_callback,
+void KernelState::CompleteOverlappedDeferred(std::move_only_function<X_RESULT()> completion_callback,
                                              uint32_t overlapped_ptr,
-                                             std::function<void()> pre_callback,
-                                             std::function<void()> post_callback) {
+                                             std::move_only_function<void()> pre_callback,
+                                             std::move_only_function<void()> post_callback) {
   CompleteOverlappedDeferredEx(
-      [completion_callback](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
+      [completion_callback = std::move(completion_callback)](uint32_t& extended_error,
+                                                             uint32_t& length) mutable -> X_RESULT {
         auto result = completion_callback();
         extended_error = static_cast<uint32_t>(result);
         length = 0;
         return result;
       },
-      overlapped_ptr, pre_callback, post_callback);
+      overlapped_ptr, std::move(pre_callback), std::move(post_callback));
 }
 
 void KernelState::CompleteOverlappedDeferredEx(
-    std::function<X_RESULT(uint32_t&, uint32_t&)> completion_callback, uint32_t overlapped_ptr,
-    std::function<void()> pre_callback, std::function<void()> post_callback) {
+    std::move_only_function<X_RESULT(uint32_t&, uint32_t&)> completion_callback,
+    uint32_t overlapped_ptr, std::move_only_function<void()> pre_callback,
+    std::move_only_function<void()> post_callback) {
   REXSYS_DEBUG("CompleteOverlappedDeferredEx: queuing for overlapped {:08X}", overlapped_ptr);
   auto ptr = memory()->TranslateVirtual(overlapped_ptr);
   XOverlappedSetResult(ptr, X_ERROR_IO_PENDING);
   XOverlappedSetContext(ptr, XThread::GetCurrentThreadHandle());
   auto global_lock = global_critical_region_.Acquire();
   dispatch_queue_.push_back(
-      [this, completion_callback, overlapped_ptr, pre_callback, post_callback]() {
+      [this, overlapped_ptr, completion_callback = std::move(completion_callback),
+       pre_callback = std::move(pre_callback), post_callback = std::move(post_callback)]() mutable {
         REXSYS_DEBUG("Deferred overlapped {:08X}: running pre_callback", overlapped_ptr);
         if (pre_callback) {
           pre_callback();

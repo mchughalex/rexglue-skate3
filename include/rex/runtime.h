@@ -63,6 +63,7 @@ struct RuntimeConfig {
   std::function<std::unique_ptr<system::IAudioSystem>(runtime::FunctionDispatcher*)> audio_factory;
   std::function<std::unique_ptr<system::IInputSystem>(bool tool_mode)> input_factory;
   std::function<void(Runtime*, system::KernelState*)> kernel_init;
+  std::filesystem::path config_path;
   bool tool_mode = false;
 };
 

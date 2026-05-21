@@ -1346,7 +1346,7 @@ u32 InterlockedPushEntrySList_entry(ppc_ptr_t<X_SLIST_HEADER> plist_ptr,
   assert_not_null(entry);
 
   alignas(8) X_SLIST_HEADER old_hdr = *plist_ptr;
-  alignas(8) X_SLIST_HEADER new_hdr = {};
+  alignas(8) X_SLIST_HEADER new_hdr = {0};
   uint32_t old_head = 0;
   do {
     old_hdr = *plist_ptr;

@@ -537,20 +537,76 @@ bool IsFinalized() {
 }
 
 void SaveConfig(const std::filesystem::path& config_path) {
-  std::string content = SerializeToTOML();
-  if (content.empty()) {
-    REXLOG_DEBUG("SaveConfig: no modified flags to save");
-    return;
-  }
-
   try {
+    toml::table config;
+    if (std::filesystem::exists(config_path)) {
+      config = toml::parse_file(config_path.string());
+    }
+
+    {
+      std::lock_guard lock(GetRegistryMutex());
+      bool modified = false;
+      for (const auto& entry : GetRegistryStorage()) {
+        if (entry.getter() == entry.default_value) {
+          continue;
+        }
+
+        const std::string value = entry.getter();
+        switch (entry.type) {
+          case FlagType::Boolean:
+            config.insert_or_assign(entry.name, value == "true" || value == "1" || value == "yes");
+            break;
+          case FlagType::Int32:
+          case FlagType::Int64: {
+            int64_t parsed = 0;
+            auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+            if (ec == std::errc()) {
+              config.insert_or_assign(entry.name, parsed);
+            }
+            break;
+          }
+          case FlagType::Uint32:
+          case FlagType::Uint64: {
+            uint64_t parsed = 0;
+            auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+            if (ec == std::errc()) {
+              if (parsed <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                config.insert_or_assign(entry.name, static_cast<int64_t>(parsed));
+              } else {
+                config.insert_or_assign(entry.name, value);
+              }
+            }
+            break;
+          }
+          case FlagType::Double: {
+            double parsed = 0.0;
+            if (ParseDouble(value, parsed)) {
+              config.insert_or_assign(entry.name, parsed);
+            }
+            break;
+          }
+          case FlagType::String:
+            config.insert_or_assign(entry.name, value);
+            break;
+          case FlagType::Command:
+            continue;
+        }
+        modified = true;
+      }
+
+      if (!modified) {
+        REXLOG_DEBUG("SaveConfig: no modified flags to save");
+        return;
+      }
+    }
+
     std::ofstream file(config_path);
     if (!file) {
       REXLOG_ERROR("SaveConfig: failed to open {}", config_path.string());
       return;
     }
     file << "# Auto-generated cvar configuration\n";
-    file << content;
+    file << config;
     REXLOG_INFO("Saved config to {}", config_path.string());
   } catch (const std::exception& e) {
     REXLOG_ERROR("SaveConfig: {}", e.what());

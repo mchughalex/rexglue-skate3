@@ -159,7 +159,6 @@ bool Memory::Initialize() {
   }
   virtual_membase_ = mapping_base_;
   physical_membase_ = mapping_base_ + 0x100000000ull;
-
   // Prepare virtual heaps.
   heaps_.v00000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestVirtual, 0x00000000,
                               0x40000000, 4096);
@@ -186,6 +185,16 @@ bool Memory::Initialize() {
                               !REXCVAR_GET(protect_zero)
                                   ? memory::kMemoryProtectRead | memory::kMemoryProtectWrite
                                   : memory::kMemoryProtectNoAccess);
+  // Some titles read through a null base with a positive offset above the
+  // protected zero page during startup. Keep the guest heap metadata unchanged,
+  // but commit this host page so raw recompiled loads don't crash before guest
+  // initialization can finish.
+  if (!rex::memory::AllocFixed(virtual_membase_ + 0x10000, 0x10000,
+                               rex::memory::AllocationType::kCommit,
+                               rex::memory::PageAccess::kReadWrite)) {
+    REXSYS_ERROR("Unable to commit low null-offset page at 0x00010000");
+    return false;
+  }
   heaps_.physical.AllocFixed(0x1FFF0000, 0x10000, 0x10000, memory::kMemoryAllocationReserve,
                              memory::kMemoryProtectNoAccess);
 

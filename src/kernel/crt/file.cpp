@@ -296,7 +296,7 @@ u32 FindFirstFileA_entry(mapped_string lpFileName, mapped_void lpFindFileData) {
   }
 
   FillFindData(lpFindFileData, entry);
-  REXKRNL_TRACE("rexcrt_FindFirstFileA: '{}' first match='{}' handle={:#x}", path, entry->name(),
+  REXKRNL_DEBUG("rexcrt_FindFirstFileA: '{}' first match='{}' handle={:#x}", path, entry->name(),
                 xfile->handle());
   return xfile->handle();
 }
@@ -326,24 +326,8 @@ u32 CreateDirectoryA_entry(mapped_string lpPathName, mapped_void lpSecurityAttri
 }
 
 u32 MoveFileA_entry(mapped_string lpExistingFileName, mapped_string lpNewFileName) {
-  const char* src = static_cast<const char*>(lpExistingFileName);
-  const char* dst = static_cast<const char*>(lpNewFileName);
-
-  auto* fs = REX_KERNEL_FS();
-  auto* src_entry = fs->ResolvePath(src);
-  if (!src_entry) {
-    REXKRNL_DEBUG("rexcrt_MoveFileA: source not found '{}'", src);
-    return 0;
-  }
-  // Win32 MoveFileA fails if the destination already exists; callers wanting
-  // overwrite semantics use MoveFileExA with MOVEFILE_REPLACE_EXISTING.
-  if (fs->ResolvePath(dst)) {
-    REXKRNL_DEBUG("rexcrt_MoveFileA: destination exists '{}'", dst);
-    return 0;
-  }
-
-  src_entry->Rename(rex::to_path(dst));
-  REXKRNL_TRACE("rexcrt_MoveFileA: '{}' -> '{}'", src, dst);
+  REXKRNL_WARN("rexcrt_MoveFileA: STUB '{}' -> '{}'", static_cast<const char*>(lpExistingFileName),
+               static_cast<const char*>(lpNewFileName));
   return 1;
 }
 
@@ -360,7 +344,7 @@ u32 GetFileAttributesA_entry(mapped_string lpFileName) {
     REXKRNL_DEBUG("rexcrt_GetFileAttributesA: not found '{}'", path);
     return kInvalidHandleValue;  // INVALID_FILE_ATTRIBUTES
   }
-  REXKRNL_TRACE("rexcrt_GetFileAttributesA: '{}' -> attrs={:#x}", path, entry->attributes());
+  REXKRNL_DEBUG("rexcrt_GetFileAttributesA: '{}' -> attrs={:#x}", path, entry->attributes());
   return entry->attributes();
 }
 
@@ -505,7 +489,7 @@ u32 CopyFileA_entry(mapped_string lpExistingFileName, mapped_string lpNewFileNam
 
   dst_file->Destroy();
   src_file->Destroy();
-  REXKRNL_TRACE("rexcrt_CopyFileA: '{}' -> '{}' {}", src, dst, ok ? "OK" : "FAILED");
+  REXKRNL_DEBUG("rexcrt_CopyFileA: '{}' -> '{}' {}", src, dst, ok ? "OK" : "FAILED");
   return ok ? 1u : 0u;
 }
 
@@ -560,7 +544,7 @@ u32 GetDiskFreeSpaceExA_entry(mapped_string lpDirectoryName,
     out[1] = static_cast<uint32_t>(free_bytes >> 32);
   }
 
-  REXKRNL_TRACE("rexcrt_GetDiskFreeSpaceExA: '{}' total={}MB free={}MB", path,
+  REXKRNL_DEBUG("rexcrt_GetDiskFreeSpaceExA: '{}' total={}MB free={}MB", path,
                 total_bytes / (1024 * 1024), free_bytes / (1024 * 1024));
   return 1;
 }

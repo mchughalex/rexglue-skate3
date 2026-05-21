@@ -62,6 +62,11 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
   }
   instance_ = this;
 
+  if (!config.config_path.empty() && std::filesystem::exists(config.config_path)) {
+    REXSYS_INFO("Runtime applying config: {}", config.config_path.string());
+    rex::cvar::LoadConfig(config.config_path);
+  }
+
   auto fail = [this](X_STATUS status, std::string_view reason) {
     REXSYS_ERROR("Runtime::Setup failed: {}", reason);
     Shutdown();
