@@ -35,6 +35,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/perf/counter.h>
 #include <rex/string.h>
 #include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/d3d12/d3d12_util.h>
@@ -1169,6 +1170,8 @@ void D3D12RenderTargetCache::WriteEdramUintPow2UAVDescriptor(D3D12_CPU_DESCRIPTO
 bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMemory& shared_memory,
                                      D3D12TextureCache& texture_cache,
                                      uint32_t& written_address_out, uint32_t& written_length_out) {
+  PROFILE_SCOPE_COUNTER(kRtResolveUs);
+  PERF_counter_inc(kRtResolveCalls);
   written_address_out = 0;
   written_length_out = 0;
 
@@ -3956,6 +3959,7 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
     const std::vector<Transfer>* render_target_transfers,
     const uint64_t* render_target_resolve_clear_values,
     const Transfer::Rectangle* resolve_clear_rectangle) {
+  PROFILE_SCOPE_COUNTER(kRtResolveTransferClearUs);
   assert_true(GetPath() == Path::kHostRenderTargets);
 
   const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
@@ -5694,6 +5698,8 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDirectResolvePipeline(
 bool D3D12RenderTargetCache::TryResolveCopyDirectly(const draw_util::ResolveInfo& resolve_info,
                                                     draw_util::ResolveCopyShaderIndex copy_shader,
                                                     bool draw_resolution_scaled) {
+  PROFILE_SCOPE_COUNTER(kRtResolveDirectUs);
+  PERF_counter_inc(kRtResolveDirectCalls);
   ++direct_resolve_attempt_count_;
   (void)copy_shader;
   (void)draw_resolution_scaled;

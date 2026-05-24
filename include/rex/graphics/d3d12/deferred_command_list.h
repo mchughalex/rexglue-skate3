@@ -29,7 +29,7 @@ class D3D12CommandProcessor;
 
 class DeferredCommandList {
  public:
-  DeferredCommandList(const D3D12CommandProcessor& command_processor,
+  DeferredCommandList(D3D12CommandProcessor& command_processor,
                       size_t initial_size_bytes = 1_MiB);
 
   void Reset();
@@ -451,7 +451,7 @@ class DeferredCommandList {
     std::memcpy(args_ptr + sizeof(DebugMarkerHeader), label_name, label_len + 1);
   }
 
- private:
+ public:
   enum class Command {
     kD3DClearDepthStencilView,
     kD3DClearRenderTargetView,
@@ -496,6 +496,7 @@ class DeferredCommandList {
     kInsertDebugMarker,
   };
 
+ private:
   struct CommandHeader {
     Command command;
     uint32_t arguments_size_elements;
@@ -640,7 +641,7 @@ class DeferredCommandList {
 
   void* WriteCommand(Command command, size_t arguments_size_bytes);
 
-  const D3D12CommandProcessor& command_processor_;
+  D3D12CommandProcessor& command_processor_;
 
   // uintmax_t to ensure uint64_t and pointer alignment of all structures.
   std::vector<uintmax_t> command_stream_;

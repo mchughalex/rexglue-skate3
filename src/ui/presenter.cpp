@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <utility>
 
 #include <rex/assert.h>
@@ -32,6 +33,17 @@
 
 REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
                     "Allow presentation from non-UI thread");
+
+REXCVAR_DEFINE_BOOL(presenter_strict_guest_output_backpressure, false, "UI/Presenter",
+                    "Block guest output when it would replace an unpresented frame in the "
+                    "presenter mailbox")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(presenter_strict_guest_output_backpressure_timeout_ms, 100, "UI/Presenter",
+                     "Maximum time strict guest output backpressure may wait before allowing a "
+                     "mailbox frame replacement")
+    .range(0, 1000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(present_letterbox, true, "UI/Presenter",
                     "Enable letterboxing for non-native aspect ratios");
@@ -580,6 +592,26 @@ bool Presenter::RefreshGuestOutput(
     guest_output_active_last_refresh_ = false;
   }
 
+  if (REXCVAR_GET(presenter_strict_guest_output_backpressure)) {
+    const int32_t timeout_ms =
+        REXCVAR_GET(presenter_strict_guest_output_backpressure_timeout_ms);
+    std::unique_lock<std::mutex> producer_wait_lock(
+        guest_output_mailbox_producer_wait_mutex_);
+    auto ready_consumed = [&]() {
+      uint32_t acquired_and_ready =
+          guest_output_mailbox_acquired_and_ready_.load(std::memory_order_acquire);
+      return (acquired_and_ready & 3) == ((acquired_and_ready >> 2) & 3);
+    };
+    if (!ready_consumed()) {
+      if (timeout_ms <= 0) {
+        guest_output_mailbox_producer_wait_condition_.wait(producer_wait_lock, ready_consumed);
+      } else {
+        guest_output_mailbox_producer_wait_condition_.wait_for(
+            producer_wait_lock, std::chrono::milliseconds(timeout_ms), ready_consumed);
+      }
+    }
+  }
+
   // Make the new image the next to present on the host (the "ready" one),
   // replacing the one already specified as the next (dropping it instead of
   // enqueueing the new image after it) to achieve the lowest latency (also,
@@ -842,6 +874,9 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
              std::memory_order_relaxed)) {
     desired_acquired_and_ready =
         (old_acquired_and_ready & ~uint32_t(3)) | (old_acquired_and_ready >> 2);
+  }
+  if (old_acquired_and_ready != desired_acquired_and_ready) {
+    guest_output_mailbox_producer_wait_condition_.notify_all();
   }
   uint32_t mailbox_index = desired_acquired_and_ready & 3;
   // Give the current acquired image to the caller, or UINT32_MAX if it's

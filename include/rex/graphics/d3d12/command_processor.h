@@ -36,6 +36,7 @@
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
 #include <rex/graphics/xenos.h>
+#include <rex/perf/counter.h>
 #include <rex/system/kernel_state.h>
 #include <rex/ui/d3d12/d3d12_descriptor_heap_pool.h>
 #include <rex/ui/d3d12/d3d12_provider.h>
@@ -45,6 +46,8 @@
 namespace rex::graphics::d3d12 {
 
 class D3D12CommandProcessor : public CommandProcessor {
+  friend class DeferredCommandList;
+
  public:
   explicit D3D12CommandProcessor(D3D12GraphicsSystem* graphics_system,
                                  system::KernelState* kernel_state);
@@ -376,6 +379,20 @@ class D3D12CommandProcessor : public CommandProcessor {
   bool IssueCopy_ReadbackResolvePath();
   bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
   bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
+  bool InitializeGpuTimestampResources();
+  void ShutdownGpuTimestampResources();
+  void BeginGpuTimestampFrame();
+  void EndGpuTimestampFrame();
+  void ResolveGpuTimestampFrame(ID3D12GraphicsCommandList* command_list);
+  void ProcessGpuTimestampResults();
+  uint32_t BeginGpuTimestampedDraw(rex::perf::DrawBucket bucket);
+  void EndGpuTimestampedDraw(uint32_t start_query_index);
+ public:
+  uint32_t BeginGpuTimestampedCounter(ID3D12GraphicsCommandList* command_list,
+                                      rex::perf::CounterId counter_id);
+  void EndGpuTimestampedCounter(ID3D12GraphicsCommandList* command_list,
+                                uint32_t start_query_index);
+ private:
 
   // Returns a buffer for reading GPU data back to the CPU. Assuming
   // synchronizing immediately after use. Always in COPY_DEST state.
@@ -667,12 +684,36 @@ class D3D12CommandProcessor : public CommandProcessor {
     uint32_t host_index = UINT32_MAX;
     bool valid = false;
   } active_occlusion_query_;
+
+  static constexpr uint32_t kMaxGpuTimestampQueriesPerFrame = 32768;
+  Microsoft::WRL::ComPtr<ID3D12QueryHeap> gpu_timestamp_query_heap_;
+  Microsoft::WRL::ComPtr<ID3D12Resource> gpu_timestamp_readback_;
+  uint64_t* gpu_timestamp_readback_mapping_ = nullptr;
+  uint64_t gpu_timestamp_frequency_ = 0;
+  bool gpu_timestamp_resources_available_ = false;
+  struct GpuTimestampFrame {
+    uint64_t frame = 0;
+    uint64_t submission = 0;
+    uint32_t query_base = 0;
+    uint32_t query_count = 0;
+    uint32_t frame_start_query = UINT32_MAX;
+    uint32_t frame_end_query = UINT32_MAX;
+    bool pending = false;
+    std::vector<rex::perf::DrawBucket> buckets;
+    std::vector<uint32_t> bucket_start_queries;
+    std::vector<rex::perf::CounterId> counter_ids;
+    std::vector<uint32_t> counter_start_queries;
+  };
+  std::array<GpuTimestampFrame, kQueueFrames> gpu_timestamp_frames_;
   struct VertexBufferState {
     uint32_t address = UINT32_MAX;
     uint32_t size = UINT32_MAX;
   };
   std::array<VertexBufferState, 96> vertex_buffer_states_{};
   uint64_t vertex_buffers_in_sync_[2] = {};
+
+  D3D12_INDEX_BUFFER_VIEW current_index_buffer_view_ = {};
+  bool current_index_buffer_view_valid_ = false;
 
   std::atomic<bool> pix_capture_requested_ = false;
   bool pix_capturing_;

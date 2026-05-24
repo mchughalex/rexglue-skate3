@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <utility>
 
@@ -25,6 +26,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/perf/counter.h>
 
 REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 24, "GPU",
                      "Texture cache memory limit for render-to-texture (MB)")
@@ -413,28 +415,48 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
   if (!pending_load.texture || (!pending_load.load_base && !pending_load.load_mips)) {
     return true;
   }
+  PROFILE_SCOPE_COUNTER(kTextureCommitLoadUs);
 
   Texture& texture = *pending_load.texture;
   TextureKey texture_key = texture.key();
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+  uint64_t load_bytes = 0;
+  if (pending_load.load_base) {
+    load_bytes += texture.GetGuestBaseSize();
+  }
+  if (pending_load.load_mips) {
+    load_bytes += texture.GetGuestMipsSize();
+  }
+#endif
   if (texture_key.scaled_resolve) {
     // Make sure all the scaled resolve memory is resident and accessible from
     // the shader, including any possible padding that hasn't yet been touched
     // by an actual resolve, but is still included in the texture size, so the
     // GPU won't be trying to access unmapped memory.
-    if (pending_load.load_base && !EnsureScaledResolveMemoryCommitted(
-                                      texture_key.base_page << 12, texture.GetGuestBaseSize(), 4)) {
-      return false;
-    }
-    if (pending_load.load_mips && !EnsureScaledResolveMemoryCommitted(
-                                      texture_key.mip_page << 12, texture.GetGuestMipsSize(), 4)) {
-      return false;
+    {
+      PROFILE_SCOPE_COUNTER(kTextureScaledResolveCommitUs);
+      if (pending_load.load_base &&
+          !EnsureScaledResolveMemoryCommitted(texture_key.base_page << 12,
+                                              texture.GetGuestBaseSize(), 4)) {
+        return false;
+      }
+      if (pending_load.load_mips &&
+          !EnsureScaledResolveMemoryCommitted(texture_key.mip_page << 12,
+                                              texture.GetGuestMipsSize(), 4)) {
+        return false;
+      }
     }
   }
 
-  if (!LoadTextureDataFromResidentMemoryImpl(texture, pending_load.load_base,
-                                             pending_load.load_mips)) {
-    return false;
+  {
+    PROFILE_SCOPE_COUNTER(kTextureLoadBackendUs);
+    if (!LoadTextureDataFromResidentMemoryImpl(texture, pending_load.load_base,
+                                               pending_load.load_mips)) {
+      return false;
+    }
   }
+  PERF_counter_inc(kTextureLoadsCommitted);
+  PERF_counter_add(kTextureLoadBytes, static_cast<int64_t>(load_bytes));
 
   // Mark the ranges as uploaded and watch them. This is needed for scaled
   // resolves as well to detect when the CPU wants to reuse the memory for a
@@ -447,6 +469,16 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
 }
 
 void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+  PROFILE_SCOPE_COUNTER(kTextureRequestUs);
+  PERF_counter_inc(kTextureRequestCalls);
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+  uint32_t requested_fetch_count = 0;
+  for (uint32_t texture_mask = used_texture_mask; texture_mask; texture_mask &= texture_mask - 1) {
+    ++requested_fetch_count;
+  }
+  PERF_counter_add(kTextureFetchesRequested, requested_fetch_count);
+#endif
+
   const auto& regs = register_file();
 
   if (texture_became_outdated_.exchange(false, std::memory_order_acquire)) {
@@ -456,16 +488,24 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     ResetTextureBindings();
   }
 
+  uint32_t textures_remaining = used_texture_mask & ~texture_bindings_in_sync_;
+  if (!textures_remaining) {
+    return;
+  }
+
   // Update the texture keys and the textures.
   uint32_t bindings_changed = 0;
-  std::vector<PendingTextureLoad> pending_texture_loads;
-  std::vector<PendingSharedMemoryRange> pending_shared_memory_ranges;
+  std::array<PendingTextureLoad, xenos::kTextureFetchConstantCount * 2> pending_texture_loads;
+  std::array<PendingSharedMemoryRange, xenos::kTextureFetchConstantCount * 4>
+      pending_shared_memory_ranges;
+  size_t pending_texture_load_count = 0;
+  size_t pending_shared_memory_range_count = 0;
   auto queue_pending_texture_load = [&](Texture* texture) {
     if (texture == nullptr) {
       return;
     }
-    for (const PendingTextureLoad& pending_load : pending_texture_loads) {
-      if (pending_load.texture == texture) {
+    for (size_t i = 0; i < pending_texture_load_count; ++i) {
+      if (pending_texture_loads[i].texture == texture) {
         return;
       }
     }
@@ -475,12 +515,16 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     if (!PrepareTextureLoad(*texture, pending_load, pending_ranges, pending_range_count)) {
       return;
     }
-    pending_texture_loads.push_back(pending_load);
+    if (pending_texture_load_count >= pending_texture_loads.size() ||
+        pending_shared_memory_range_count + pending_range_count >
+            pending_shared_memory_ranges.size()) {
+      return;
+    }
+    pending_texture_loads[pending_texture_load_count++] = pending_load;
     for (size_t i = 0; i < pending_range_count; ++i) {
-      pending_shared_memory_ranges.push_back(pending_ranges[i]);
+      pending_shared_memory_ranges[pending_shared_memory_range_count++] = pending_ranges[i];
     }
   };
-  uint32_t textures_remaining = used_texture_mask & ~texture_bindings_in_sync_;
   uint32_t index = 0;
   while (rex::bit_scan_forward(textures_remaining, &index)) {
     uint32_t index_bit = UINT32_C(1) << index;
@@ -558,33 +602,55 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
   }
 
   COUNT_profile_set("gpu/texture_cache/request_textures_pending_load_count",
-                    uint32_t(pending_texture_loads.size()));
+                    uint32_t(pending_texture_load_count));
   COUNT_profile_set("gpu/texture_cache/request_textures_pending_range_count",
-                    uint32_t(pending_shared_memory_ranges.size()));
+                    uint32_t(pending_shared_memory_range_count));
+  PERF_counter_add(kTexturePendingLoads, static_cast<int64_t>(pending_texture_load_count));
+  PERF_counter_add(kTexturePendingRanges, static_cast<int64_t>(pending_shared_memory_range_count));
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+  uint64_t pending_shared_memory_bytes = 0;
+  for (size_t i = 0; i < pending_shared_memory_range_count; ++i) {
+    pending_shared_memory_bytes += pending_shared_memory_ranges[i].length;
+  }
+  PERF_counter_add(kTexturePendingBytes, static_cast<int64_t>(pending_shared_memory_bytes));
+#endif
 
   bool batched_shared_memory_request_succeeded = true;
-  std::vector<std::pair<uint32_t, uint32_t>> pending_shared_memory_range_pairs;
-  if (!pending_shared_memory_ranges.empty()) {
-    pending_shared_memory_range_pairs.reserve(pending_shared_memory_ranges.size());
-    for (const PendingSharedMemoryRange& pending_range : pending_shared_memory_ranges) {
-      pending_shared_memory_range_pairs.emplace_back(pending_range.start, pending_range.length);
+  std::array<std::pair<uint32_t, uint32_t>, xenos::kTextureFetchConstantCount * 4>
+      pending_shared_memory_range_pairs;
+  if (pending_shared_memory_range_count != 0) {
+    for (size_t i = 0; i < pending_shared_memory_range_count; ++i) {
+      const PendingSharedMemoryRange& pending_range = pending_shared_memory_ranges[i];
+      pending_shared_memory_range_pairs[i] =
+          std::make_pair(pending_range.start, pending_range.length);
     }
-    batched_shared_memory_request_succeeded = shared_memory().RequestRanges(
-        pending_shared_memory_range_pairs.data(), pending_shared_memory_range_pairs.size());
+    {
+      PROFILE_SCOPE_COUNTER(kTextureSharedMemoryRequestUs);
+      batched_shared_memory_request_succeeded = shared_memory().RequestRanges(
+          pending_shared_memory_range_pairs.data(), pending_shared_memory_range_count);
+    }
   }
 
   if (batched_shared_memory_request_succeeded) {
-    for (const PendingTextureLoad& pending_load : pending_texture_loads) {
-      CommitPreparedTextureLoad(pending_load);
+    for (size_t i = 0; i < pending_texture_load_count; ++i) {
+      CommitPreparedTextureLoad(pending_texture_loads[i]);
     }
   } else {
-    for (const PendingTextureLoad& pending_load : pending_texture_loads) {
+    for (size_t i = 0; i < pending_texture_load_count; ++i) {
+      const PendingTextureLoad& pending_load = pending_texture_loads[i];
       if (pending_load.texture != nullptr) {
         LoadTextureData(*pending_load.texture);
       }
     }
   }
   if (bindings_changed) {
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+    uint32_t changed_binding_count = 0;
+    for (uint32_t changed_mask = bindings_changed; changed_mask; changed_mask &= changed_mask - 1) {
+      ++changed_binding_count;
+    }
+    PERF_counter_add(kTextureBindingsChanged, changed_binding_count);
+#endif
     UpdateTextureBindingsImpl(bindings_changed);
   }
 }

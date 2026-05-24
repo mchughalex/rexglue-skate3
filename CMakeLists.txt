@@ -23,7 +23,7 @@ if(REXGLUE_ENABLE_TRACY)
     add_compile_definitions($<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)
 endif()
 if(REXGLUE_ENABLE_PERF_COUNTERS)
-    add_compile_definitions($<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PERF_COUNTERS>)
+    add_compile_definitions(REXGLUE_ENABLE_PERF_COUNTERS)
 endif()
 
 # Graphics backend selection

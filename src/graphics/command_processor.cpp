@@ -690,6 +690,7 @@ void CommandProcessor::ReturnFromWait() {}
 
 uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t write_index) {
   SCOPE_profile_cpu_f("gpu");
+  PROFILE_SCOPE_COUNTER(kCpuPrimaryBufferUs);
 
   // If we have a pending trace stream open it now. That way we ensure we get
   // all commands.
@@ -732,6 +733,7 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
 
 void CommandProcessor::ExecuteIndirectBuffer(uint32_t ptr, uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
+  PROFILE_SCOPE_COUNTER(kCpuIndirectBufferUs);
 
   trace_writer_.WriteIndirectBufferStart(ptr, count * sizeof(uint32_t));
 
@@ -1445,6 +1447,7 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
   vgt_draw_initiator.value = reader->ReadAndSwap<uint32_t>();
   --count_remaining;
   WriteRegister(XE_GPU_REG_VGT_DRAW_INITIATOR, vgt_draw_initiator.value);
+  PROFILE_GUEST_DRAW_PACKET();
 
   bool draw_succeeded = true;
   // TODO(Triang3l): Remove IndexBufferInfo and replace handling of all this

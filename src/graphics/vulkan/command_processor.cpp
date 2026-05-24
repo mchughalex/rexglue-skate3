@@ -26,6 +26,7 @@
 #include <rex/assert.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
+#include <rex/perf/counter.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/graphics/util/draw.h>
@@ -3626,6 +3627,20 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
   if (edram_mode == xenos::EdramMode::kCopy) {
     // Special copy handling.
+    const uint32_t primitive_count = draw_util::EstimatePrimitiveCount(prim_type, index_count);
+    PROFILE_DRAW_BUCKET(rex::perf::DrawBucket::kCopyResolve, index_count, primitive_count);
+    if (rex::perf::ShouldCollectDrawFingerprints()) {
+      rex::perf::DrawFingerprint fingerprint;
+      fingerprint.bucket = rex::perf::DrawBucket::kCopyResolve;
+      fingerprint.vertex_shader_hash =
+          active_vertex_shader() ? active_vertex_shader()->ucode_data_hash() : 0;
+      fingerprint.pixel_shader_hash =
+          active_pixel_shader() ? active_pixel_shader()->ucode_data_hash() : 0;
+      fingerprint.primitive_type = uint32_t(prim_type);
+      fingerprint.vertex_count = index_count;
+      fingerprint.primitive_count = primitive_count;
+      PROFILE_DRAW_FINGERPRINT(fingerprint);
+    }
     return IssueCopy();
   }
 
@@ -4128,11 +4143,57 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       render_target_cache_->last_update_render_pass(),
       render_target_cache_->last_update_framebuffer());
 
+  const uint32_t host_draw_vertex_count = primitive_processing_result.host_draw_vertex_count;
+  const uint32_t host_draw_primitive_count = draw_util::EstimatePrimitiveCount(
+      primitive_processing_result.host_primitive_type, host_draw_vertex_count);
+  const rex::perf::DrawBucket draw_bucket =
+      memexport_writes_possible
+          ? rex::perf::DrawBucket::kMemexport
+          : (edram_mode == xenos::EdramMode::kDepthOnly
+                 ? rex::perf::DrawBucket::kDepthOnly
+                 : (pixel_shader == nullptr ? rex::perf::DrawBucket::kNoPixelShader
+                                            : rex::perf::DrawBucket::kMainColorDepth));
+  const bool collect_draw_fingerprints = rex::perf::ShouldCollectDrawFingerprints();
+  rex::perf::DrawFingerprint draw_fingerprint;
+  if (collect_draw_fingerprints) {
+    draw_fingerprint.bucket = draw_bucket;
+    draw_fingerprint.vertex_shader_hash = vertex_shader->ucode_data_hash();
+    draw_fingerprint.pixel_shader_hash = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+    draw_fingerprint.primitive_type = uint32_t(primitive_processing_result.host_primitive_type);
+    draw_fingerprint.vertex_count = host_draw_vertex_count;
+    draw_fingerprint.primitive_count = host_draw_primitive_count;
+    const Shader::ConstantRegisterMap& fingerprint_constant_map =
+        vertex_shader->constant_register_map();
+    size_t fingerprint_fetch_count = 0;
+    for (uint32_t i = 0; i < rex::countof(fingerprint_constant_map.vertex_fetch_bitmap); ++i) {
+      uint32_t fetch_bits = fingerprint_constant_map.vertex_fetch_bitmap[i];
+      uint32_t bit;
+      while (fingerprint_fetch_count < rex::perf::DrawFingerprint::kVertexFetchCount &&
+             rex::bit_scan_forward(fetch_bits, &bit)) {
+        fetch_bits &= ~(uint32_t(1) << bit);
+        xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(i * 32 + bit);
+        draw_fingerprint.vertex_fetch_address[fingerprint_fetch_count] = fetch.address << 2;
+        draw_fingerprint.vertex_fetch_size[fingerprint_fetch_count] = fetch.size << 2;
+        ++fingerprint_fetch_count;
+      }
+      if (fingerprint_fetch_count >= rex::perf::DrawFingerprint::kVertexFetchCount) {
+        break;
+      }
+    }
+  }
+
   // Draw.
   if (primitive_processing_result.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
       shader_32bit_index_dma) {
-    deferred_command_buffer_.CmdVkDraw(primitive_processing_result.host_draw_vertex_count, 1, 0, 0);
+    PROFILE_DRAW_CALL();
+    PROFILE_VERTICES(host_draw_vertex_count);
+    PROFILE_PRIMITIVES(host_draw_primitive_count);
+    PROFILE_DRAW_BUCKET(draw_bucket, host_draw_vertex_count, host_draw_primitive_count);
+    if (collect_draw_fingerprints) {
+      PROFILE_DRAW_FINGERPRINT(draw_fingerprint);
+    }
+    deferred_command_buffer_.CmdVkDraw(host_draw_vertex_count, 1, 0, 0);
   } else {
     std::pair<VkBuffer, VkDeviceSize> index_buffer;
     switch (primitive_processing_result.index_buffer_type) {
@@ -4163,8 +4224,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         primitive_processing_result.host_index_format == xenos::IndexFormat::kInt16
             ? VK_INDEX_TYPE_UINT16
             : VK_INDEX_TYPE_UINT32);
-    deferred_command_buffer_.CmdVkDrawIndexed(primitive_processing_result.host_draw_vertex_count, 1,
-                                              0, 0, 0);
+    PROFILE_DRAW_CALL();
+    PROFILE_VERTICES(host_draw_vertex_count);
+    PROFILE_PRIMITIVES(host_draw_primitive_count);
+    PROFILE_DRAW_BUCKET(draw_bucket, host_draw_vertex_count, host_draw_primitive_count);
+    if (collect_draw_fingerprints) {
+      PROFILE_DRAW_FINGERPRINT(draw_fingerprint);
+    }
+    deferred_command_buffer_.CmdVkDrawIndexed(host_draw_vertex_count, 1, 0, 0, 0);
   }
 
   // Invalidate textures in memexported memory and watch for changes.

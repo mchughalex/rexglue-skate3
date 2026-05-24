@@ -12,7 +12,9 @@
 #include <rex/graphics/graphics_system.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -27,6 +29,7 @@
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
+#include <rex/thread.h>
 #include <rex/ui/graphics_provider.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
@@ -42,6 +45,21 @@ REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, 
 REXCVAR_DEFINE_BOOL(store_shaders, true, "GPU",
                     "Store shaders persistently and load them when loading games to avoid "
                     "runtime spikes and freezes when playing the game not for the first time.");
+
+REXCVAR_DEFINE_BOOL(vblank_host_clock_pacing, false, "GPU",
+                    "Pace guest vblank from an absolute host-clock schedule instead of repeatedly "
+                    "polling the guest clock")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(vblank_precise_sleep_margin_us, 750, "GPU",
+                     "How early the vblank worker should wake before the target for precise wait")
+    .range(0, 5000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(vblank_precise_spin_us, 150, "GPU",
+                     "Final vblank wait window that should busy-spin for tighter pacing")
+    .range(0, 1000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace {
 
@@ -63,6 +81,46 @@ rex::graphics::CommandProcessor::SwapPostEffect ParseSwapPostEffect(
 }  // namespace
 
 namespace rex::graphics {
+
+namespace {
+
+uint64_t TicksToUsInteger(uint64_t ticks, uint64_t frequency) {
+  return frequency ? ticks * 1000000ull / frequency : 0;
+}
+
+uint64_t UsToTicksInteger(uint64_t us, uint64_t frequency) {
+  return us * frequency / 1000000ull;
+}
+
+void PreciseWaitUntilHostTick(uint64_t target_host_tick, uint64_t host_frequency) {
+  const uint64_t sleep_margin_ticks = UsToTicksInteger(
+      uint64_t(std::max(0, REXCVAR_GET(vblank_precise_sleep_margin_us))), host_frequency);
+  const uint64_t spin_ticks = UsToTicksInteger(
+      uint64_t(std::max(0, REXCVAR_GET(vblank_precise_spin_us))), host_frequency);
+
+  while (true) {
+    uint64_t now = chrono::Clock::QueryHostTickCount();
+    if (now >= target_host_tick) {
+      return;
+    }
+    uint64_t remaining_ticks = target_host_tick - now;
+    if (remaining_ticks > sleep_margin_ticks && sleep_margin_ticks) {
+      uint64_t sleep_ticks = remaining_ticks - sleep_margin_ticks;
+      uint64_t sleep_us = TicksToUsInteger(sleep_ticks, host_frequency);
+      if (sleep_us >= 1000) {
+        rex::thread::Sleep(std::chrono::microseconds(sleep_us));
+      } else {
+        rex::thread::MaybeYield();
+      }
+    } else if (remaining_ticks > spin_ticks && spin_ticks) {
+      rex::thread::MaybeYield();
+    } else {
+      std::atomic_signal_fence(std::memory_order_seq_cst);
+    }
+  }
+}
+
+}  // namespace
 
 // Nvidia Optimus/AMD PowerXpress support.
 // These exports force the process to trigger the discrete GPU in multi-GPU
@@ -161,16 +219,84 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
         uint64_t vsync_interval_ticks =
             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
-        uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
+        uint64_t host_tick_frequency = chrono::Clock::QueryHostTickFrequency();
+        uint64_t vsync_interval_host_ticks =
+            std::max(uint64_t(1), uint64_t(double(host_tick_frequency) / refresh_rate_hz));
+        uint64_t no_vsync_interval_host_ticks = std::max(uint64_t(1), host_tick_frequency / 1000);
+        uint64_t initial_interval_ticks =
+            REXCVAR_GET(vsync) ? vsync_interval_ticks : no_vsync_interval_ticks;
+        uint64_t next_frame_time = chrono::Clock::QueryGuestTickCount() + initial_interval_ticks;
+        uint64_t next_frame_host_tick =
+            chrono::Clock::QueryHostTickCount() +
+            (REXCVAR_GET(vsync) ? vsync_interval_host_ticks : no_vsync_interval_host_ticks);
         while (vsync_worker_running_) {
-          uint64_t current_time = chrono::Clock::QueryGuestTickCount();
-          uint64_t interval_ticks =
-              REXCVAR_GET(vsync) ? vsync_interval_ticks : no_vsync_interval_ticks;
-          while (current_time - last_frame_time >= interval_ticks) {
-            MarkVblank();
-            last_frame_time += interval_ticks;
+          if (REXCVAR_GET(vblank_host_clock_pacing)) {
+            bool vsync_enabled = REXCVAR_GET(vsync);
+            uint64_t interval_ticks =
+                vsync_enabled ? vsync_interval_ticks : no_vsync_interval_ticks;
+            uint64_t interval_host_ticks =
+                vsync_enabled ? vsync_interval_host_ticks : no_vsync_interval_host_ticks;
+
+            if (vsync_enabled) {
+              PreciseWaitUntilHostTick(next_frame_host_tick, host_tick_frequency);
+            } else {
+              rex::thread::Sleep(std::chrono::milliseconds(1));
+            }
+
+            uint64_t current_host_tick = chrono::Clock::QueryHostTickCount();
+            if (current_host_tick >= next_frame_host_tick) {
+              constexpr uint32_t kMaxVblanksPerWake = 3;
+              uint32_t vblanks_sent = 0;
+              uint64_t current_guest_tick = chrono::Clock::QueryGuestTickCount();
+              do {
+                MarkVblank();
+                next_frame_time += interval_ticks;
+                next_frame_host_tick += interval_host_ticks;
+                ++vblanks_sent;
+              } while (vsync_worker_running_ && vblanks_sent < kMaxVblanksPerWake &&
+                       current_host_tick >= next_frame_host_tick);
+
+              if (current_host_tick >= next_frame_host_tick) {
+                next_frame_time = current_guest_tick + interval_ticks;
+                next_frame_host_tick = current_host_tick + interval_host_ticks;
+              }
+            }
+            continue;
           }
-          rex::thread::Sleep(std::chrono::milliseconds(1));
+
+          uint64_t current_time = chrono::Clock::QueryGuestTickCount();
+          bool vsync_enabled = REXCVAR_GET(vsync);
+          uint64_t interval_ticks = vsync_enabled ? vsync_interval_ticks : no_vsync_interval_ticks;
+
+          if (current_time >= next_frame_time) {
+            constexpr uint32_t kMaxVblanksPerWake = 3;
+            uint32_t vblanks_sent = 0;
+            do {
+              MarkVblank();
+              next_frame_time += interval_ticks;
+              ++vblanks_sent;
+            } while (vsync_worker_running_ && vblanks_sent < kMaxVblanksPerWake &&
+                     current_time >= next_frame_time);
+
+            if (current_time >= next_frame_time) {
+              next_frame_time = current_time + interval_ticks;
+            }
+          }
+
+          current_time = chrono::Clock::QueryGuestTickCount();
+          if (!vsync_enabled) {
+            rex::thread::Sleep(std::chrono::milliseconds(1));
+          } else if (next_frame_time > current_time) {
+            uint64_t sleep_ticks = next_frame_time - current_time;
+            uint64_t sleep_us = sleep_ticks * 1000000 / guest_tick_frequency;
+            if (sleep_us > 2000) {
+              rex::thread::Sleep(std::chrono::microseconds(sleep_us - 1000));
+            } else {
+              rex::thread::MaybeYield();
+            }
+          } else {
+            rex::thread::MaybeYield();
+          }
         }
         return 0;
       }));

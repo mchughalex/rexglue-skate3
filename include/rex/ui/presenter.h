@@ -936,6 +936,8 @@ class Presenter {
   // accessible only by the guest output refreshing - it's the image that the
   // refresher may write to.
   uint32_t guest_output_mailbox_writable_ = 1;
+  std::mutex guest_output_mailbox_producer_wait_mutex_;
+  std::condition_variable guest_output_mailbox_producer_wait_condition_;
   // The guest output images may be consumed by two operations - painting, and
   // capturing to a CPU-side buffer. These two usually never happen in parallel
   // in reality though, as they're usually not even needed both at once in the

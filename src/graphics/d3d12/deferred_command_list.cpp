@@ -15,10 +15,95 @@
 #include <rex/graphics/d3d12/deferred_command_list.h>
 #include <rex/graphics/flags.h>
 #include <rex/math.h>
+#include <rex/perf/counter.h>
 
 namespace rex::graphics::d3d12 {
 
-DeferredCommandList::DeferredCommandList(const D3D12CommandProcessor& command_processor,
+namespace {
+
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+
+struct DeferredCommandPerfCategory {
+  rex::perf::CounterId count;
+  rex::perf::CounterId cpu_us;
+  rex::perf::CounterId gpu_us = rex::perf::CounterId::kCount;
+};
+
+DeferredCommandPerfCategory GetPerfCategory(DeferredCommandList::Command command) {
+  using Command = DeferredCommandList::Command;
+  using CounterId = rex::perf::CounterId;
+  switch (command) {
+    case Command::kD3DClearDepthStencilView:
+    case Command::kD3DClearRenderTargetView:
+    case Command::kD3DClearUnorderedAccessViewUint:
+      return {CounterId::kDeferredClearCount, CounterId::kDeferredClearUs,
+              CounterId::kGpuClearUs};
+    case Command::kD3DResourceBarrier:
+      return {CounterId::kDeferredBarrierCount, CounterId::kDeferredBarrierUs,
+              CounterId::kGpuBarrierUs};
+    case Command::kD3DCopyBufferRegion:
+      return {CounterId::kDeferredCopyBufferCount, CounterId::kDeferredCopyBufferUs,
+              CounterId::kGpuCopyBufferUs};
+    case Command::kD3DCopyResource:
+      return {CounterId::kDeferredCopyResourceCount, CounterId::kDeferredCopyResourceUs,
+              CounterId::kGpuCopyResourceUs};
+    case Command::kCopyTexture:
+    case Command::kD3DCopyTextureRegion:
+      return {CounterId::kDeferredCopyTextureCount, CounterId::kDeferredCopyTextureUs,
+              CounterId::kGpuCopyTextureUs};
+    case Command::kD3DDispatch:
+      return {CounterId::kDeferredDispatchCount, CounterId::kDeferredDispatchUs,
+              CounterId::kGpuDispatchUs};
+    case Command::kD3DDrawIndexedInstanced:
+    case Command::kD3DDrawInstanced:
+      return {CounterId::kDeferredDrawCount, CounterId::kDeferredDrawUs};
+    case Command::kD3DBeginQuery:
+    case Command::kD3DEndQuery:
+      return {CounterId::kDeferredQueryCount, CounterId::kDeferredQueryUs};
+    case Command::kD3DResolveQueryData:
+      return {CounterId::kDeferredResolveQueryCount, CounterId::kDeferredResolveQueryUs,
+              CounterId::kGpuResolveQueryUs};
+    default:
+      return {CounterId::kDeferredStateCount, CounterId::kDeferredStateUs};
+  }
+}
+
+class DeferredCommandPerfScope {
+ public:
+  DeferredCommandPerfScope(D3D12CommandProcessor& command_processor,
+                           ID3D12GraphicsCommandList* command_list,
+                           DeferredCommandPerfCategory category)
+      : command_processor_(command_processor), command_list_(command_list), timer_(category.cpu_us) {
+    rex::perf::IncrementCounter(rex::perf::CounterId::kDeferredCommands);
+    rex::perf::IncrementCounter(category.count);
+    if (category.gpu_us != rex::perf::CounterId::kCount) {
+      gpu_query_ = command_processor_.BeginGpuTimestampedCounter(command_list_, category.gpu_us);
+    }
+  }
+
+  ~DeferredCommandPerfScope() {
+    command_processor_.EndGpuTimestampedCounter(command_list_, gpu_query_);
+  }
+
+ private:
+  D3D12CommandProcessor& command_processor_;
+  ID3D12GraphicsCommandList* command_list_;
+  uint32_t gpu_query_ = UINT32_MAX;
+  rex::perf::ScopedCounterTimer timer_;
+};
+
+#define REX_D3D12_DEFERRED_COMMAND_PERF_SCOPE(command_processor, command_list, command) \
+  DeferredCommandPerfScope perf_scope(command_processor, command_list, GetPerfCategory(command))
+
+#else
+
+#define REX_D3D12_DEFERRED_COMMAND_PERF_SCOPE(command_processor, command_list, command)
+
+#endif
+
+}  // namespace
+
+DeferredCommandList::DeferredCommandList(D3D12CommandProcessor& command_processor,
                                          size_t initial_size)
     : command_processor_(command_processor) {
   command_stream_.reserve(initial_size / sizeof(uintmax_t));
@@ -40,6 +125,7 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
     const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(stream);
     stream += kCommandHeaderSizeElements;
     stream_remaining -= kCommandHeaderSizeElements;
+    REX_D3D12_DEFERRED_COMMAND_PERF_SCOPE(command_processor_, command_list, header.command);
     switch (header.command) {
       case Command::kD3DClearDepthStencilView: {
         auto& args = *reinterpret_cast<const ClearDepthStencilViewHeader*>(stream);
@@ -62,6 +148,7 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
       } break;
       case Command::kD3DCopyBufferRegion: {
         auto& args = *reinterpret_cast<const D3DCopyBufferRegionArguments*>(stream);
+        PERF_counter_add(kDeferredCopyBufferBytes, static_cast<int64_t>(args.num_bytes));
         command_list->CopyBufferRegion(args.dst_buffer, args.dst_offset, args.src_buffer,
                                        args.src_offset, args.num_bytes);
       } break;

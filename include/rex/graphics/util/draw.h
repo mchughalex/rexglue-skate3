@@ -93,6 +93,39 @@ inline bool IsPrimitivePolygonal(const RegisterFile& regs) {
                               regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type);
 }
 
+constexpr uint32_t EstimatePrimitiveCount(xenos::PrimitiveType type, uint32_t vertex_count) {
+  switch (type) {
+    case xenos::PrimitiveType::kPointList:
+      return vertex_count;
+    case xenos::PrimitiveType::kLineList:
+      return vertex_count / 2;
+    case xenos::PrimitiveType::kLineStrip:
+    case xenos::PrimitiveType::kLineLoop:
+    case xenos::PrimitiveType::k2DLineStrip:
+      return vertex_count > 1 ? vertex_count - 1 : 0;
+    case xenos::PrimitiveType::kTriangleList:
+    case xenos::PrimitiveType::kRectangleList:
+    case xenos::PrimitiveType::kTrianglePatch:
+      return vertex_count / 3;
+    case xenos::PrimitiveType::kLinePatch:
+      return vertex_count;
+    case xenos::PrimitiveType::kQuadPatch:
+      return vertex_count / 4;
+    case xenos::PrimitiveType::kTriangleFan:
+    case xenos::PrimitiveType::kTriangleStrip:
+    case xenos::PrimitiveType::kTriangleWithWFlags:
+    case xenos::PrimitiveType::kPolygon:
+    case xenos::PrimitiveType::k2DTriStrip:
+      return vertex_count > 2 ? vertex_count - 2 : 0;
+    case xenos::PrimitiveType::kQuadList:
+      return vertex_count / 4;
+    case xenos::PrimitiveType::kQuadStrip:
+      return vertex_count > 3 ? (vertex_count - 2) / 2 : 0;
+    default:
+      return 0;
+  }
+}
+
 // Whether with the current state, any samples to rasterize (for any reason, not
 // only to write something to a render target, but also to do sample counting or
 // pixel shader memexport) can be generated. Finally dropping draw calls can

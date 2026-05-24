@@ -10,15 +10,20 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cmath>
+#include <chrono>
 #include <memory>
 #include <utility>
 
 #include <rex/assert.h>
+#include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/perf/counter.h>
+#include <rex/thread.h>
 #include <rex/ui/d3d12/d3d12_presenter.h>
 #include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/d3d12/d3d12_util.h>
@@ -33,7 +38,82 @@
 REXCVAR_DEFINE_BOOL(d3d12_allow_variable_refresh_rate_and_tearing, true, "UI/D3D12",
                     "Allow variable refresh rate and tearing");
 
+REXCVAR_DEFINE_BOOL(d3d12_strict_vsync_present, false, "UI/D3D12",
+                    "Use DXGI Present(1, 0) instead of immediate tearing/restart present")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_BOOL(d3d12_frame_latency_waitable_object, false, "UI/D3D12",
+                    "Create the swapchain with a frame latency waitable object and wait before "
+                    "painting")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_INT32(d3d12_max_frame_latency, 1, "UI/D3D12",
+                     "Maximum queued swapchain frames when the frame latency waitable object is "
+                     "enabled")
+    .range(1, 16)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_BOOL(d3d12_present_frame_limiter, false, "UI/D3D12",
+                    "Limit host presents with an explicit host-clock cadence before Present")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_DOUBLE(d3d12_present_frame_limiter_fps, 60.0, "UI/D3D12",
+                      "Target host present rate for d3d12_present_frame_limiter")
+    .range(1.0, 1000.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(d3d12_present_frame_limiter_sleep_margin_us, 750, "UI/D3D12",
+                     "How early the present limiter wakes before the target present time")
+    .range(0, 5000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(d3d12_present_frame_limiter_spin_us, 150, "UI/D3D12",
+                     "Final present limiter wait window that busy-spins for tighter cadence")
+    .range(0, 1000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace rex::ui::d3d12 {
+
+namespace {
+
+uint64_t TicksToUsInteger(uint64_t ticks, uint64_t frequency) {
+  return frequency ? ticks * 1000000ull / frequency : 0;
+}
+
+uint64_t UsToTicksInteger(uint64_t us, uint64_t frequency) {
+  return us * frequency / 1000000ull;
+}
+
+void PreciseWaitUntilHostTick(uint64_t target_host_tick, uint64_t host_frequency) {
+  const uint64_t sleep_margin_ticks = UsToTicksInteger(
+      uint64_t(std::max(0, REXCVAR_GET(d3d12_present_frame_limiter_sleep_margin_us))),
+      host_frequency);
+  const uint64_t spin_ticks = UsToTicksInteger(
+      uint64_t(std::max(0, REXCVAR_GET(d3d12_present_frame_limiter_spin_us))), host_frequency);
+
+  while (true) {
+    uint64_t now = rex::chrono::Clock::QueryHostTickCount();
+    if (now >= target_host_tick) {
+      return;
+    }
+    uint64_t remaining_ticks = target_host_tick - now;
+    if (remaining_ticks > sleep_margin_ticks && sleep_margin_ticks) {
+      uint64_t sleep_ticks = remaining_ticks - sleep_margin_ticks;
+      uint64_t sleep_us = TicksToUsInteger(sleep_ticks, host_frequency);
+      if (sleep_us >= 1000) {
+        rex::thread::Sleep(std::chrono::microseconds(sleep_us));
+      } else {
+        rex::thread::MaybeYield();
+      }
+    } else if (remaining_ticks > spin_ticks && spin_ticks) {
+      rex::thread::MaybeYield();
+    } else {
+      std::atomic_signal_fence(std::memory_order_seq_cst);
+    }
+  }
+}
+
+}  // namespace
 
 // Generated with `xb buildshaders`.
 namespace shaders {
@@ -343,6 +423,8 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
       std::min(new_surface_width, uint32_t(D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION));
   uint32_t new_swap_chain_height =
       std::min(new_surface_height, uint32_t(D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION));
+  REXLOG_INFO("D3D12Presenter: surface={}x{}, swapchain={}x{}", new_surface_width,
+              new_surface_height, new_swap_chain_width, new_swap_chain_height);
 
   // ConnectOrReconnectPaintingToSurfaceFromUIThread may be called only for the
   // surface of the current swap chain or when the old swap chain has already
@@ -363,7 +445,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
     }
     bool swap_chain_resized = SUCCEEDED(paint_context_.swap_chain->ResizeBuffers(
         0, UINT(new_swap_chain_width), UINT(new_swap_chain_height), DXGI_FORMAT_UNKNOWN,
-        paint_context_.swap_chain_allows_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0));
+        paint_context_.swap_chain_flags));
     if (swap_chain_resized) {
       for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
         if (FAILED(paint_context_.swap_chain->GetBuffer(
@@ -413,6 +495,9 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
       // rate.
       swap_chain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
     }
+    if (REXCVAR_GET(d3d12_frame_latency_waitable_object)) {
+      swap_chain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    }
     IDXGIFactory2* dxgi_factory = provider_.GetDXGIFactory();
     ID3D12CommandQueue* direct_queue = provider_.GetDirectQueue();
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swap_chain_1;
@@ -451,6 +536,28 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
     paint_context_.swap_chain_height = new_swap_chain_height;
     paint_context_.swap_chain_allows_tearing =
         (swap_chain_desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+    paint_context_.swap_chain_frame_latency_waitable =
+        (swap_chain_desc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) != 0;
+    paint_context_.swap_chain_flags = swap_chain_desc.Flags;
+    if (paint_context_.swap_chain_frame_latency_waitable) {
+      UINT max_frame_latency =
+          UINT(std::max(int32_t(1), REXCVAR_GET(d3d12_max_frame_latency)));
+      HRESULT latency_result =
+          paint_context_.swap_chain->SetMaximumFrameLatency(max_frame_latency);
+      if (FAILED(latency_result)) {
+        REXLOG_WARN("D3D12Presenter: SetMaximumFrameLatency({}) failed: 0x{:08X}",
+                    max_frame_latency, uint32_t(latency_result));
+      }
+      paint_context_.swap_chain_frame_latency_waitable_object =
+          paint_context_.swap_chain->GetFrameLatencyWaitableObject();
+      if (!paint_context_.swap_chain_frame_latency_waitable_object) {
+        REXLOG_WARN("D3D12Presenter: Frame latency waitable object requested but unavailable");
+        paint_context_.swap_chain_frame_latency_waitable = false;
+      } else {
+        REXLOG_INFO("D3D12Presenter: frame latency waitable enabled, max_latency={}",
+                    max_frame_latency);
+      }
+    }
     for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
       if (FAILED(paint_context_.swap_chain->GetBuffer(
               i, IID_PPV_ARGS(&paint_context_.swap_chain_buffers[i])))) {
@@ -549,13 +656,25 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
   for (Microsoft::WRL::ComPtr<ID3D12Resource>& swap_chain_buffer_ref : swap_chain_buffers) {
     swap_chain_buffer_ref.Reset();
   }
+  swap_chain_frame_latency_waitable_object = nullptr;
   swap_chain.Reset();
   swap_chain_allows_tearing = false;
+  swap_chain_frame_latency_waitable = false;
+  swap_chain_flags = 0;
+  frame_limiter_next_present_tick = 0;
   swap_chain_height = 0;
   swap_chain_width = 0;
 }
 
 Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawers) {
+  const uint64_t host_frequency = rex::chrono::Clock::QueryHostTickFrequency();
+  PROFILE_SCOPE_COUNTER(kCpuD3D12PaintTotalUs);
+  if (paint_context_.swap_chain_frame_latency_waitable &&
+      paint_context_.swap_chain_frame_latency_waitable_object) {
+    PROFILE_SCOPE_COUNTER(kCpuD3D12PresentWaitUs);
+    WaitForSingleObjectEx(paint_context_.swap_chain_frame_latency_waitable_object, INFINITE, FALSE);
+  }
+
   // Begin the command list with the command allocator not currently potentially
   // used on the GPU.
   UINT64 current_paint_submission = paint_context_.paint_submission_tracker.GetCurrentSubmission();
@@ -590,6 +709,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
   GuestOutputPaintConfig guest_output_paint_config;
   Microsoft::WRL::ComPtr<ID3D12Resource> guest_output_resource;
   {
+    PROFILE_SCOPE_COUNTER(kCpuD3D12PaintConsumeUs);
     uint32_t guest_output_mailbox_index;
     std::unique_lock<std::mutex> guest_output_consumer_lock(ConsumeGuestOutput(
         guest_output_mailbox_index, &guest_output_properties, &guest_output_paint_config));
@@ -601,6 +721,9 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
     // using the new reference or is exclusively owned by main target painting
     // (and multiple threads can't paint the main target at the same time).
   }
+
+  rex::perf::ScopedCounterTimer paint_record_timer(
+      rex::perf::CounterId::kCpuD3D12PaintRecordUs);
 
   if (guest_output_resource) {
     GuestOutputPaintFlow guest_output_flow = GetGuestOutputPaintFlow(
@@ -1127,6 +1250,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
                                        paint_context_.swap_chain_height, command_list,
                                        ui_submission_tracker_.GetCurrentSubmission(),
                                        ui_submission_tracker_.GetCompletedSubmission());
+    PROFILE_SCOPE_COUNTER(kCpuD3D12PaintUiUs);
     ExecuteUIDrawersFromUIThread(ui_draw_context);
   }
 
@@ -1142,23 +1266,46 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
 
   // Execute and present.
   command_list->Close();
+  paint_record_timer.Stop();
   ID3D12CommandList* execute_command_list = command_list;
-  provider_.GetDirectQueue()->ExecuteCommandLists(1, &execute_command_list);
+  {
+    PROFILE_SCOPE_COUNTER(kCpuD3D12ExecuteCommandListsUs);
+    provider_.GetDirectQueue()->ExecuteCommandLists(1, &execute_command_list);
+  }
   if (execute_ui_drawers) {
     ui_submission_tracker_.NextSubmission();
   }
   paint_context_.paint_submission_tracker.NextSubmission();
-  // Present as soon as possible, without waiting for vsync (the host refresh
-  // rate may be something like 144 Hz, which is not a multiple of the common
-  // 30 Hz or 60 Hz guest refresh rate), and allowing dropping outdated queued
-  // frames for lower latency. Also, if possible, allowing tearing to use
-  // variable refresh rate in borderless fullscreen (note that if DXGI
-  // fullscreen is ever used in, the allow tearing flag must not be passed in
-  // fullscreen, but DXGI fullscreen is largely unneeded with the flip
-  // presentation model used in Direct3D 12).
-  HRESULT present_result = paint_context_.swap_chain->Present(
-      0, DXGI_PRESENT_RESTART |
+  // Present immediately by default, but allow explicit host-side cadence
+  // control for testing pacing independently of DXGI vsync.
+  if (REXCVAR_GET(d3d12_present_frame_limiter)) {
+    const double limiter_fps = REXCVAR_GET(d3d12_present_frame_limiter_fps);
+    const uint64_t limiter_interval_ticks =
+        std::max(uint64_t(1),
+                 uint64_t(double(host_frequency) / std::max(1.0, limiter_fps)));
+    uint64_t now = rex::chrono::Clock::QueryHostTickCount();
+    if (!paint_context_.frame_limiter_next_present_tick ||
+        now > paint_context_.frame_limiter_next_present_tick + limiter_interval_ticks) {
+      paint_context_.frame_limiter_next_present_tick = now;
+    }
+    {
+      PROFILE_SCOPE_COUNTER(kCpuD3D12PresentWaitUs);
+      PreciseWaitUntilHostTick(paint_context_.frame_limiter_next_present_tick, host_frequency);
+    }
+    paint_context_.frame_limiter_next_present_tick += limiter_interval_ticks;
+  }
+  const bool strict_vsync_present = REXCVAR_GET(d3d12_strict_vsync_present);
+  UINT sync_interval = strict_vsync_present ? 1 : 0;
+  UINT present_flags =
+      strict_vsync_present
+          ? 0
+          : (DXGI_PRESENT_RESTART |
              (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
+  HRESULT present_result;
+  {
+    PROFILE_SCOPE_COUNTER(kCpuD3D12PresentUs);
+    present_result = paint_context_.swap_chain->Present(sync_interval, present_flags);
+  }
   // Even if presentation has failed, work might have been enqueued anyway
   // internally before the failure according to Jesse Natalie from the DirectX
   // Discord server.

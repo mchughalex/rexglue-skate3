@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstring>
 #include <sstream>
@@ -48,6 +49,44 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace rex::graphics::d3d12 {
+
+namespace {
+
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+class ScopedDrawStageTimer {
+ public:
+  explicit ScopedDrawStageTimer(rex::perf::CounterId counter_id)
+      : counter_id_(counter_id), active_(rex::perf::ShouldCollectDrawDiagnostics()) {
+    if (active_) {
+      start_ = Clock::now();
+    }
+  }
+
+  ~ScopedDrawStageTimer() {
+    if (!active_) {
+      return;
+    }
+    auto elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start_).count();
+    PROFILE_DRAW_STAGE_US(counter_id_, elapsed_us);
+  }
+
+ private:
+  using Clock = std::chrono::steady_clock;
+  rex::perf::CounterId counter_id_;
+  bool active_;
+  Clock::time_point start_;
+};
+
+#define REX_CONCAT_INNER(a, b) a##b
+#define REX_CONCAT(a, b) REX_CONCAT_INNER(a, b)
+#define REX_D3D12_DRAW_STAGE_TIMER(counter_id) \
+  ScopedDrawStageTimer REX_CONCAT(draw_stage_timer_, __LINE__)(rex::perf::CounterId::counter_id)
+#else
+#define REX_D3D12_DRAW_STAGE_TIMER(counter_id)
+#endif
+
+}  // namespace
 
 // Generated with `xb buildshaders`.
 namespace shaders {
@@ -246,6 +285,31 @@ bool D3D12CommandProcessor::PushTransitionBarrier(ID3D12Resource* resource,
   if (old_state == new_state) {
     return false;
   }
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+  PERF_counter_inc(kD3D12BarriersQueued);
+  PERF_counter_inc(kD3D12TransitionBarriers);
+  const D3D12_RESOURCE_STATES combined_states = old_state | new_state;
+  if (combined_states & D3D12_RESOURCE_STATE_RENDER_TARGET) {
+    PERF_counter_inc(kD3D12RtTransitions);
+  }
+  if (combined_states & D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+    PERF_counter_inc(kD3D12DepthTransitions);
+  }
+  if (combined_states & (D3D12_RESOURCE_STATE_COPY_DEST | D3D12_RESOURCE_STATE_COPY_SOURCE)) {
+    PERF_counter_inc(kD3D12CopyTransitions);
+  }
+  if (combined_states &
+      (D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)) {
+    PERF_counter_inc(kD3D12SrvTransitions);
+  }
+  if (combined_states & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+    PERF_counter_inc(kD3D12UavTransitions);
+  }
+  if (combined_states & D3D12_RESOURCE_STATE_PRESENT) {
+    PERF_counter_inc(kD3D12PresentTransitions);
+  }
+#endif
   D3D12_RESOURCE_BARRIER barrier;
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -259,6 +323,10 @@ bool D3D12CommandProcessor::PushTransitionBarrier(ID3D12Resource* resource,
 
 void D3D12CommandProcessor::PushAliasingBarrier(ID3D12Resource* old_resource,
                                                 ID3D12Resource* new_resource) {
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+  PERF_counter_inc(kD3D12BarriersQueued);
+  PERF_counter_inc(kD3D12AliasingBarriers);
+#endif
   D3D12_RESOURCE_BARRIER barrier;
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
   barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -268,6 +336,10 @@ void D3D12CommandProcessor::PushAliasingBarrier(ID3D12Resource* old_resource,
 }
 
 void D3D12CommandProcessor::PushUAVBarrier(ID3D12Resource* resource) {
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+  PERF_counter_inc(kD3D12BarriersQueued);
+  PERF_counter_inc(kD3D12UavBarriers);
+#endif
   D3D12_RESOURCE_BARRIER barrier;
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
   barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -276,8 +348,12 @@ void D3D12CommandProcessor::PushUAVBarrier(ID3D12Resource* resource) {
 }
 
 void D3D12CommandProcessor::SubmitBarriers() {
+  PROFILE_SCOPE_COUNTER(kCpuD3D12SubmitBarriersUs);
   UINT barrier_count = UINT(barriers_.size());
   if (barrier_count != 0) {
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+    PERF_counter_add(kD3D12BarriersSubmitted, barrier_count);
+#endif
     deferred_command_list_.D3DResourceBarrier(barrier_count, barriers_.data());
     barriers_.clear();
   }
@@ -946,6 +1022,14 @@ bool D3D12CommandProcessor::SetupContext() {
         "the emulator, reducing to {}x{}",
         draw_resolution_scale_x, draw_resolution_scale_y);
   }
+  REXGPU_INFO(
+      "D3D12 effective config: draw_resolution_scale={}x{}, readback_memexport={}, "
+      "d3d12_readback_memexport={}, readback_resolve='{}', d3d12_readback_resolve={}, "
+      "anisotropic_override={}, gpu_allow_invalid_fetch_constants={}",
+      draw_resolution_scale_x, draw_resolution_scale_y, REXCVAR_GET(readback_memexport),
+      REXCVAR_GET(d3d12_readback_memexport), REXCVAR_GET(readback_resolve),
+      REXCVAR_GET(d3d12_readback_resolve), REXCVAR_GET(anisotropic_override),
+      REXCVAR_GET(gpu_allow_invalid_fetch_constants));
 
   shared_memory_ = std::make_unique<D3D12SharedMemory>(*this, *memory_, trace_writer_);
   if (!shared_memory_->Initialize()) {
@@ -1643,6 +1727,9 @@ bool D3D12CommandProcessor::SetupContext() {
   pix_capture_requested_.store(false, std::memory_order_relaxed);
   pix_capturing_ = false;
   occlusion_query_resources_available_ = InitializeOcclusionQueryResources();
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+  gpu_timestamp_resources_available_ = InitializeGpuTimestampResources();
+#endif
 
   // Just not to expose uninitialized memory.
   std::memset(&system_constants_, 0, sizeof(system_constants_));
@@ -1653,6 +1740,9 @@ bool D3D12CommandProcessor::SetupContext() {
 void D3D12CommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
   InvalidateAllVertexBufferResidency();
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+  ShutdownGpuTimestampResources();
+#endif
   ShutdownOcclusionQueryResources();
 
   ui::d3d12::util::ReleaseAndNull(readback_buffer_);
@@ -2298,6 +2388,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+  REX_D3D12_DRAW_STAGE_TIMER(kDrawStageTotalUs);
 
   ID3D12Device* device = GetD3D12Provider().GetDevice();
   const RegisterFile& regs = *register_file_;
@@ -2305,6 +2396,22 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
   if (edram_mode == xenos::EdramMode::kCopy) {
     // Special copy handling.
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+    const uint32_t primitive_count = draw_util::EstimatePrimitiveCount(primitive_type, index_count);
+    PROFILE_DRAW_BUCKET(rex::perf::DrawBucket::kCopyResolve, index_count, primitive_count);
+    if (rex::perf::ShouldCollectDrawFingerprints()) {
+      rex::perf::DrawFingerprint fingerprint;
+      fingerprint.bucket = rex::perf::DrawBucket::kCopyResolve;
+      fingerprint.vertex_shader_hash =
+          active_vertex_shader() ? active_vertex_shader()->ucode_data_hash() : 0;
+      fingerprint.pixel_shader_hash =
+          active_pixel_shader() ? active_pixel_shader()->ucode_data_hash() : 0;
+      fingerprint.primitive_type = uint32_t(primitive_type);
+      fingerprint.vertex_count = index_count;
+      fingerprint.primitive_count = primitive_count;
+      PROFILE_DRAW_FINGERPRINT(fingerprint);
+    }
+#endif
     return IssueCopy();
   }
 
@@ -2357,8 +2464,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
 
   // Process primitives.
   PrimitiveProcessor::ProcessingResult primitive_processing_result;
-  if (!primitive_processor_->Process(primitive_processing_result)) {
-    return false;
+  {
+    REX_D3D12_DRAW_STAGE_TIMER(kDrawStagePrimitiveUs);
+    if (!primitive_processor_->Process(primitive_processing_result)) {
+      return false;
+    }
   }
   if (!primitive_processing_result.host_draw_vertex_count) {
     // Nothing to draw.
@@ -2388,21 +2498,17 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
   uint32_t normalized_color_mask =
       pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
                    : 0;
-  if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
-                                    normalized_color_mask, *vertex_shader)) {
-    return false;
+  {
+    REX_D3D12_DRAW_STAGE_TIMER(kDrawStageRenderTargetUs);
+    if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+                                      normalized_color_mask, *vertex_shader)) {
+      return false;
+    }
   }
 
   // Create the pipeline (for this, need the actually used render target formats
   // from the render target cache), translating the shaders - doing this now to
   // obtain the used textures.
-  D3D12Shader::D3D12Translation* vertex_shader_translation =
-      static_cast<D3D12Shader::D3D12Translation*>(
-          vertex_shader->GetOrCreateTranslation(vertex_shader_modification.value));
-  D3D12Shader::D3D12Translation* pixel_shader_translation =
-      pixel_shader ? static_cast<D3D12Shader::D3D12Translation*>(
-                         pixel_shader->GetOrCreateTranslation(pixel_shader_modification.value))
-                   : nullptr;
   uint32_t bound_depth_and_color_render_target_bits;
   uint32_t bound_depth_and_color_render_target_formats[1 + xenos::kMaxColorRenderTargets];
   bool host_render_targets_used =
@@ -2416,22 +2522,36 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
   }
   void* pipeline_handle;
   ID3D12RootSignature* root_signature;
-  if (!pipeline_cache_->ConfigurePipeline(
-          vertex_shader_translation, pixel_shader_translation, primitive_processing_result,
-          normalized_depth_control, normalized_color_mask, bound_depth_and_color_render_target_bits,
-          bound_depth_and_color_render_target_formats, &pipeline_handle, &root_signature)) {
-    return false;
-  }
-  if (REXCVAR_GET(async_shader_compilation) &&
-      pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
-    return true;
+  {
+    REX_D3D12_DRAW_STAGE_TIMER(kDrawStagePipelineUs);
+
+    D3D12Shader::D3D12Translation* vertex_shader_translation =
+        static_cast<D3D12Shader::D3D12Translation*>(
+            vertex_shader->GetOrCreateTranslation(vertex_shader_modification.value));
+    D3D12Shader::D3D12Translation* pixel_shader_translation =
+        pixel_shader ? static_cast<D3D12Shader::D3D12Translation*>(
+                           pixel_shader->GetOrCreateTranslation(pixel_shader_modification.value))
+                     : nullptr;
+    if (!pipeline_cache_->ConfigurePipeline(
+            vertex_shader_translation, pixel_shader_translation, primitive_processing_result,
+            normalized_depth_control, normalized_color_mask, bound_depth_and_color_render_target_bits,
+            bound_depth_and_color_render_target_formats, &pipeline_handle, &root_signature)) {
+      return false;
+    }
+    if (REXCVAR_GET(async_shader_compilation) &&
+        pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
+      return true;
+    }
   }
 
   // Update the textures - this may bind pipelines.
   uint32_t used_texture_mask =
       vertex_shader->GetUsedTextureMaskAfterTranslation() |
       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
-  texture_cache_->RequestTextures(used_texture_mask);
+  {
+    REX_D3D12_DRAW_STAGE_TIMER(kDrawStageTextureUs);
+    texture_cache_->RequestTextures(used_texture_mask);
+  }
 
   // Bind the pipeline after configuring it and doing everything that may bind
   // other pipelines.
@@ -2441,139 +2561,151 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
     current_external_pipeline_ = nullptr;
   }
 
-  // Get dynamic rasterizer state.
-  uint32_t draw_resolution_scale_x = texture_cache_->draw_resolution_scale_x();
-  uint32_t draw_resolution_scale_y = texture_cache_->draw_resolution_scale_y();
-
-  bool convert_z_to_float24 =
-      host_render_targets_used && render_target_cache_->depth_float24_convert_in_pixel_shader();
-  bool ps_writes_depth = pixel_shader && pixel_shader->writes_depth();
-
-  // Build a cache key from all viewport-affecting state to skip redundant
-  // recalculation when the viewport registers haven't changed between draws.
-  ViewportCacheKey viewport_key;
-  viewport_key.pa_cl_clip_cntl = regs[XE_GPU_REG_PA_CL_CLIP_CNTL];
-  viewport_key.pa_cl_vte_cntl = regs[XE_GPU_REG_PA_CL_VTE_CNTL];
-  viewport_key.pa_su_sc_mode_cntl = regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL];
-  viewport_key.pa_su_vtx_cntl = regs[XE_GPU_REG_PA_SU_VTX_CNTL];
-  viewport_key.pa_sc_window_offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
-  viewport_key.normalized_depth_control = normalized_depth_control.value;
-  std::memcpy(viewport_key.vport_regs, &regs[XE_GPU_REG_PA_CL_VPORT_XSCALE],
-              sizeof(viewport_key.vport_regs));
-  viewport_key.flags = (uint32_t(convert_z_to_float24) << 0) |
-                       (uint32_t(host_render_targets_used) << 1) | (uint32_t(ps_writes_depth) << 2);
-
   draw_util::ViewportInfo viewport_info;
-  if (viewport_cache_valid_ && viewport_key == previous_viewport_key_) {
-    viewport_info = previous_viewport_info_;
-  } else {
-    draw_util::GetHostViewportInfo(regs, draw_resolution_scale_x, draw_resolution_scale_y, true,
-                                   D3D12_VIEWPORT_BOUNDS_MAX, D3D12_VIEWPORT_BOUNDS_MAX, false,
-                                   normalized_depth_control, convert_z_to_float24,
-                                   host_render_targets_used, ps_writes_depth, viewport_info);
-    previous_viewport_key_ = viewport_key;
-    previous_viewport_info_ = viewport_info;
-    viewport_cache_valid_ = true;
+  {
+    REX_D3D12_DRAW_STAGE_TIMER(kDrawStageFixedFunctionUs);
+
+    // Get dynamic rasterizer state.
+    uint32_t draw_resolution_scale_x = texture_cache_->draw_resolution_scale_x();
+    uint32_t draw_resolution_scale_y = texture_cache_->draw_resolution_scale_y();
+
+    bool convert_z_to_float24 =
+        host_render_targets_used && render_target_cache_->depth_float24_convert_in_pixel_shader();
+    bool ps_writes_depth = pixel_shader && pixel_shader->writes_depth();
+
+    // Build a cache key from all viewport-affecting state to skip redundant
+    // recalculation when the viewport registers haven't changed between draws.
+    ViewportCacheKey viewport_key;
+    viewport_key.pa_cl_clip_cntl = regs[XE_GPU_REG_PA_CL_CLIP_CNTL];
+    viewport_key.pa_cl_vte_cntl = regs[XE_GPU_REG_PA_CL_VTE_CNTL];
+    viewport_key.pa_su_sc_mode_cntl = regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL];
+    viewport_key.pa_su_vtx_cntl = regs[XE_GPU_REG_PA_SU_VTX_CNTL];
+    viewport_key.pa_sc_window_offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
+    viewport_key.normalized_depth_control = normalized_depth_control.value;
+    std::memcpy(viewport_key.vport_regs, &regs[XE_GPU_REG_PA_CL_VPORT_XSCALE],
+                sizeof(viewport_key.vport_regs));
+    viewport_key.flags = (uint32_t(convert_z_to_float24) << 0) |
+                         (uint32_t(host_render_targets_used) << 1) |
+                         (uint32_t(ps_writes_depth) << 2);
+
+    if (viewport_cache_valid_ && viewport_key == previous_viewport_key_) {
+      viewport_info = previous_viewport_info_;
+    } else {
+      draw_util::GetHostViewportInfo(regs, draw_resolution_scale_x, draw_resolution_scale_y, true,
+                                     D3D12_VIEWPORT_BOUNDS_MAX, D3D12_VIEWPORT_BOUNDS_MAX, false,
+                                     normalized_depth_control, convert_z_to_float24,
+                                     host_render_targets_used, ps_writes_depth, viewport_info);
+      previous_viewport_key_ = viewport_key;
+      previous_viewport_info_ = viewport_info;
+      viewport_cache_valid_ = true;
+    }
+
+    draw_util::Scissor scissor;
+    draw_util::GetScissor(regs, scissor);
+    scissor.offset[0] *= draw_resolution_scale_x;
+    scissor.offset[1] *= draw_resolution_scale_y;
+    scissor.extent[0] *= draw_resolution_scale_x;
+    scissor.extent[1] *= draw_resolution_scale_y;
+
+    // Update viewport, scissor, blend factor and stencil reference.
+    UpdateFixedFunctionState(viewport_info, scissor, primitive_polygonal, normalized_depth_control);
+
+    // Update system constants before uploading them.
+    // TODO(Triang3l): With ROV, pass the disabled render target mask for safety.
+    UpdateSystemConstantValues(memexport_used, primitive_polygonal,
+                               primitive_processing_result.line_loop_closing_index,
+                               primitive_processing_result.host_shader_index_endian, viewport_info,
+                               used_texture_mask, normalized_depth_control, normalized_color_mask);
   }
 
-  draw_util::Scissor scissor;
-  draw_util::GetScissor(regs, scissor);
-  scissor.offset[0] *= draw_resolution_scale_x;
-  scissor.offset[1] *= draw_resolution_scale_y;
-  scissor.extent[0] *= draw_resolution_scale_x;
-  scissor.extent[1] *= draw_resolution_scale_y;
-
-  // Update viewport, scissor, blend factor and stencil reference.
-  UpdateFixedFunctionState(viewport_info, scissor, primitive_polygonal, normalized_depth_control);
-
-  // Update system constants before uploading them.
-  // TODO(Triang3l): With ROV, pass the disabled render target mask for safety.
-  UpdateSystemConstantValues(memexport_used, primitive_polygonal,
-                             primitive_processing_result.line_loop_closing_index,
-                             primitive_processing_result.host_shader_index_endian, viewport_info,
-                             used_texture_mask, normalized_depth_control, normalized_color_mask);
-
   // Update constant buffers, descriptors and root parameters.
-  if (!UpdateBindings(vertex_shader, pixel_shader, root_signature, memexport_used)) {
-    return false;
+  {
+    REX_D3D12_DRAW_STAGE_TIMER(kDrawStageBindingsUs);
+    if (!UpdateBindings(vertex_shader, pixel_shader, root_signature, memexport_used)) {
+      return false;
+    }
   }
   // Must not call anything that can change the descriptor heap from now on!
 
-  // Ensure vertex buffers are resident.
-  const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
-  for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
-    uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
-    uint32_t j;
-    while (rex::bit_scan_forward(vfetch_bits_remaining, &j)) {
-      vfetch_bits_remaining &= ~(uint32_t(1) << j);
-      uint32_t vfetch_index = i * 32 + j;
-      uint64_t vfetch_bit = uint64_t(1) << (vfetch_index & 63);
-      if (vertex_buffers_in_sync_[vfetch_index >> 6] & vfetch_bit) {
-        continue;
-      }
-      xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(vfetch_index);
-      switch (vfetch_constant.type) {
-        case xenos::FetchConstantType::kVertex:
-          break;
-        case xenos::FetchConstantType::kInvalidVertex:
-          if (REXCVAR_GET(gpu_allow_invalid_fetch_constants)) {
+  {
+    REX_D3D12_DRAW_STAGE_TIMER(kDrawStageVertexBuffersUs);
+
+    // Ensure vertex buffers are resident.
+    const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
+    for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+      uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
+      uint32_t j;
+      while (rex::bit_scan_forward(vfetch_bits_remaining, &j)) {
+        vfetch_bits_remaining &= ~(uint32_t(1) << j);
+        uint32_t vfetch_index = i * 32 + j;
+        uint64_t vfetch_bit = uint64_t(1) << (vfetch_index & 63);
+        if (vertex_buffers_in_sync_[vfetch_index >> 6] & vfetch_bit) {
+          continue;
+        }
+        xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(vfetch_index);
+        switch (vfetch_constant.type) {
+          case xenos::FetchConstantType::kVertex:
             break;
-          }
-          REXGPU_WARN(
-              "Vertex fetch constant {} ({:08X} {:08X}) has \"invalid\" type! "
-              "This is incorrect behavior, but you can try bypassing this by "
-              "launching Xenia with --gpu_allow_invalid_fetch_constants=true.",
-              vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
+          case xenos::FetchConstantType::kInvalidVertex:
+            if (REXCVAR_GET(gpu_allow_invalid_fetch_constants)) {
+              break;
+            }
+            REXGPU_WARN(
+                "Vertex fetch constant {} ({:08X} {:08X}) has \"invalid\" type! "
+                "This is incorrect behavior, but you can try bypassing this by "
+                "launching Xenia with --gpu_allow_invalid_fetch_constants=true.",
+                vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
+            return false;
+          default:
+            REXGPU_WARN("Vertex fetch constant {} ({:08X} {:08X}) is completely invalid!",
+                        vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
+            return false;
+        }
+        VertexBufferState& state = vertex_buffer_states_[vfetch_index];
+        if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
+          vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
+          continue;
+        }
+        if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
+          REXGPU_ERROR(
+              "Failed to request vertex buffer at 0x{:08X} (size {}) in the "
+              "shared memory",
+              vfetch_constant.address << 2, vfetch_constant.size << 2);
           return false;
-        default:
-          REXGPU_WARN("Vertex fetch constant {} ({:08X} {:08X}) is completely invalid!",
-                      vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
-          return false;
-      }
-      VertexBufferState& state = vertex_buffer_states_[vfetch_index];
-      if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
+        }
+        state.address = vfetch_constant.address;
+        state.size = vfetch_constant.size;
         vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
-        continue;
       }
-      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
+    }
+
+    // Gather memexport ranges and ensure the heaps for them are resident, and
+    // also load the data surrounding the export and to fill the regions that
+    // won't be modified by the shaders.
+    memexport_ranges_.clear();
+    if (memexport_used_vertex) {
+      draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_);
+    }
+    if (memexport_used_pixel) {
+      draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
+    }
+    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+      if (!shared_memory_->RequestRange(memexport_range.base_address_dwords << 2,
+                                        memexport_range.size_bytes)) {
         REXGPU_ERROR(
-            "Failed to request vertex buffer at 0x{:08X} (size {}) in the "
+            "Failed to request memexport stream at 0x{:08X} (size {}) in the "
             "shared memory",
-            vfetch_constant.address << 2, vfetch_constant.size << 2);
+            memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
         return false;
       }
-      state.address = vfetch_constant.address;
-      state.size = vfetch_constant.size;
-      vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
     }
-  }
-
-  // Gather memexport ranges and ensure the heaps for them are resident, and
-  // also load the data surrounding the export and to fill the regions that
-  // won't be modified by the shaders.
-  memexport_ranges_.clear();
-  if (memexport_used_vertex) {
-    draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_);
-  }
-  if (memexport_used_pixel) {
-    draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
-  }
-  for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-    if (!shared_memory_->RequestRange(memexport_range.base_address_dwords << 2,
-                                      memexport_range.size_bytes)) {
-      REXGPU_ERROR(
-          "Failed to request memexport stream at 0x{:08X} (size {}) in the "
-          "shared memory",
-          memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
-      return false;
-    }
-  }
-  if (memexport_used && memexport_ranges_.empty()) {
-    if (!shared_memory_->RequestRange(0, SharedMemory::kBufferSize)) {
-      REXGPU_ERROR(
-          "Failed to request full shared memory residency for unresolved "
-          "memexport destinations");
-      return false;
+    if (memexport_used && memexport_ranges_.empty()) {
+      if (!shared_memory_->RequestRange(0, SharedMemory::kBufferSize)) {
+        REXGPU_ERROR(
+            "Failed to request full shared memory residency for unresolved "
+            "memexport destinations");
+        return false;
+      }
     }
   }
 
@@ -2641,6 +2773,47 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
   SetPrimitiveTopology(primitive_topology);
   // Must not call anything that may change the primitive topology from now on!
 
+  const uint32_t host_draw_vertex_count = primitive_processing_result.host_draw_vertex_count;
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+  const uint32_t host_draw_primitive_count = draw_util::EstimatePrimitiveCount(
+      primitive_processing_result.host_primitive_type, host_draw_vertex_count);
+  const rex::perf::DrawBucket draw_bucket =
+      memexport_used
+          ? rex::perf::DrawBucket::kMemexport
+          : (edram_mode == xenos::EdramMode::kDepthOnly
+                 ? rex::perf::DrawBucket::kDepthOnly
+                 : (pixel_shader == nullptr ? rex::perf::DrawBucket::kNoPixelShader
+                                            : rex::perf::DrawBucket::kMainColorDepth));
+  const bool collect_draw_fingerprints = rex::perf::ShouldCollectDrawFingerprints();
+  rex::perf::DrawFingerprint draw_fingerprint;
+  if (collect_draw_fingerprints) {
+    draw_fingerprint.bucket = draw_bucket;
+    draw_fingerprint.vertex_shader_hash = vertex_shader->ucode_data_hash();
+    draw_fingerprint.pixel_shader_hash = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+    draw_fingerprint.primitive_type = uint32_t(primitive_processing_result.host_primitive_type);
+    draw_fingerprint.vertex_count = host_draw_vertex_count;
+    draw_fingerprint.primitive_count = host_draw_primitive_count;
+    const Shader::ConstantRegisterMap& fingerprint_constant_map =
+        vertex_shader->constant_register_map();
+    size_t fingerprint_fetch_count = 0;
+    for (uint32_t i = 0; i < rex::countof(fingerprint_constant_map.vertex_fetch_bitmap); ++i) {
+      uint32_t fetch_bits = fingerprint_constant_map.vertex_fetch_bitmap[i];
+      uint32_t bit;
+      while (fingerprint_fetch_count < rex::perf::DrawFingerprint::kVertexFetchCount &&
+             rex::bit_scan_forward(fetch_bits, &bit)) {
+        fetch_bits &= ~(uint32_t(1) << bit);
+        xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(i * 32 + bit);
+        draw_fingerprint.vertex_fetch_address[fingerprint_fetch_count] = fetch.address << 2;
+        draw_fingerprint.vertex_fetch_size[fingerprint_fetch_count] = fetch.size << 2;
+        ++fingerprint_fetch_count;
+      }
+      if (fingerprint_fetch_count >= rex::perf::DrawFingerprint::kVertexFetchCount) {
+        break;
+      }
+    }
+  }
+#endif
+
   // Draw.
   if (primitive_processing_result.index_buffer_type ==
       PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
@@ -2649,14 +2822,30 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
     } else {
       shared_memory_->UseForReading();
     }
-    SubmitBarriers();
-    PROFILE_DRAW_CALL();
-    PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
-    deferred_command_list_.D3DDrawInstanced(primitive_processing_result.host_draw_vertex_count, 1,
-                                            0, 0);
+    {
+      REX_D3D12_DRAW_STAGE_TIMER(kDrawStageBarriersUs);
+      SubmitBarriers();
+    }
+    {
+      REX_D3D12_DRAW_STAGE_TIMER(kDrawStageSubmitUs);
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+      PROFILE_DRAW_CALL();
+      PROFILE_VERTICES(host_draw_vertex_count);
+      PROFILE_PRIMITIVES(host_draw_primitive_count);
+      PROFILE_DRAW_BUCKET(draw_bucket, host_draw_vertex_count, host_draw_primitive_count);
+      if (collect_draw_fingerprints) {
+        PROFILE_DRAW_FINGERPRINT(draw_fingerprint);
+      }
+      uint32_t gpu_timestamp_query = BeginGpuTimestampedDraw(draw_bucket);
+#endif
+      deferred_command_list_.D3DDrawInstanced(host_draw_vertex_count, 1, 0, 0);
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+      EndGpuTimestampedDraw(gpu_timestamp_query);
+#endif
+    }
   } else {
     D3D12_INDEX_BUFFER_VIEW index_buffer_view;
-    index_buffer_view.SizeInBytes = primitive_processing_result.host_draw_vertex_count;
+    index_buffer_view.SizeInBytes = host_draw_vertex_count;
     if (primitive_processing_result.host_index_format == xenos::IndexFormat::kInt16) {
       index_buffer_view.SizeInBytes *= sizeof(uint16_t);
       index_buffer_view.Format = DXGI_FORMAT_R16_UINT;
@@ -2702,17 +2891,40 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
         assert_unhandled_case(primitive_processing_result.index_buffer_type);
         return false;
     }
-    deferred_command_list_.D3DIASetIndexBuffer(&index_buffer_view);
+    if (!current_index_buffer_view_valid_ ||
+        current_index_buffer_view_.BufferLocation != index_buffer_view.BufferLocation ||
+        current_index_buffer_view_.SizeInBytes != index_buffer_view.SizeInBytes ||
+        current_index_buffer_view_.Format != index_buffer_view.Format) {
+      deferred_command_list_.D3DIASetIndexBuffer(&index_buffer_view);
+      current_index_buffer_view_ = index_buffer_view;
+      current_index_buffer_view_valid_ = true;
+    }
     if (memexport_used) {
       shared_memory_->UseForWriting();
     } else {
       shared_memory_->UseForReading();
     }
-    SubmitBarriers();
-    PROFILE_DRAW_CALL();
-    PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
-    deferred_command_list_.D3DDrawIndexedInstanced(
-        primitive_processing_result.host_draw_vertex_count, 1, 0, 0, 0);
+    {
+      REX_D3D12_DRAW_STAGE_TIMER(kDrawStageBarriersUs);
+      SubmitBarriers();
+    }
+    {
+      REX_D3D12_DRAW_STAGE_TIMER(kDrawStageSubmitUs);
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+      PROFILE_DRAW_CALL();
+      PROFILE_VERTICES(host_draw_vertex_count);
+      PROFILE_PRIMITIVES(host_draw_primitive_count);
+      PROFILE_DRAW_BUCKET(draw_bucket, host_draw_vertex_count, host_draw_primitive_count);
+      if (collect_draw_fingerprints) {
+        PROFILE_DRAW_FINGERPRINT(draw_fingerprint);
+      }
+      uint32_t gpu_timestamp_query = BeginGpuTimestampedDraw(draw_bucket);
+#endif
+      deferred_command_list_.D3DDrawIndexedInstanced(host_draw_vertex_count, 1, 0, 0, 0);
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+      EndGpuTimestampedDraw(gpu_timestamp_query);
+#endif
+    }
     if (scratch_index_buffer != nullptr) {
       ReleaseScratchGPUBuffer(scratch_index_buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
     }
@@ -2931,6 +3143,8 @@ bool D3D12CommandProcessor::IssueCopy() {
 }
 
 bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
+  PROFILE_SCOPE_COUNTER(kRtResolveReadbackUs);
+  PERF_counter_inc(kRtResolveReadbackCalls);
   uint32_t written_address, written_length;
   if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, written_address,
                                      written_length)) {
@@ -3147,6 +3361,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 }
 
 void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+  PROFILE_SCOPE_COUNTER(kCpuD3D12CheckFenceUs);
   if (await_submission >= submission_current_) {
     if (submission_open_) {
       EndSubmission(false);
@@ -3162,6 +3377,7 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
                     SUCCEEDED(queue_operations_since_submission_fence_->SetEventOnCompletion(
                         fence_value, fence_completion_event_)))) {
         PROFILE_CMD_BUFFER_STALL();
+        rex::perf::ScopedCounterTimer wait_timer(rex::perf::CounterId::kCpuD3D12FenceWaitUs);
         WaitForSingleObject(fence_completion_event_, INFINITE);
         queue_operations_done_since_submission_signal_ = false;
       } else {
@@ -3181,6 +3397,7 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
     if (SUCCEEDED(
             submission_fence_->SetEventOnCompletion(await_submission, fence_completion_event_))) {
       PROFILE_CMD_BUFFER_STALL();
+      rex::perf::ScopedCounterTimer wait_timer(rex::perf::CounterId::kCpuD3D12FenceWaitUs);
       WaitForSingleObject(fence_completion_event_, INFINITE);
       submission_completed_ = submission_fence_->GetCompletedValue();
     }
@@ -3192,6 +3409,8 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
     // Not updated - no need to reclaim or download things.
     return;
   }
+
+  PROFILE_SCOPE_COUNTER(kCpuD3D12FenceReclaimUs);
 
   // Reclaim command allocators.
   while (command_allocator_submitted_first_) {
@@ -3295,6 +3514,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+  PROFILE_SCOPE_COUNTER(kCpuD3D12BeginSubmissionUs);
 
   if (device_removed_) {
     return false;
@@ -3321,8 +3541,11 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   // Check the fence - needed for all kinds of submissions (to reclaim transient
   // resources early) and specifically for frames (not to queue too many), and
   // await the availability of the current frame.
-  CheckSubmissionFence(is_opening_frame ? closed_frame_submissions_[frame_current_ % kQueueFrames]
-                                        : 0);
+  {
+    PROFILE_SCOPE_COUNTER(kCpuD3D12BeginSubmissionFenceUs);
+    CheckSubmissionFence(is_opening_frame ? closed_frame_submissions_[frame_current_ % kQueueFrames]
+                                          : 0);
+  }
   // TODO(Triang3l): If failed to await (completed submission < awaited frame
   // submission), do something like dropping the draw command that wanted to
   // open the frame.
@@ -3337,9 +3560,14 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
       }
       frame_completed_ = frame;
     }
+    {
+      PROFILE_SCOPE_COUNTER(kCpuD3D12ProcessGpuTimestampsUs);
+      ProcessGpuTimestampResults();
+    }
   }
 
   if (!submission_open_) {
+    PROFILE_SCOPE_COUNTER(kCpuD3D12BeginSubmissionOpenUs);
     submission_open_ = true;
 
     // Start a new deferred command list - will submit it to the real one in the
@@ -3355,6 +3583,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
     viewport_cache_valid_ = false;
     current_guest_pipeline_ = nullptr;
     current_external_pipeline_ = nullptr;
+    current_index_buffer_view_valid_ = false;
     current_graphics_root_signature_ = nullptr;
     current_graphics_root_up_to_date_ = 0;
     if (bindless_resources_used_) {
@@ -3374,6 +3603,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   }
 
   if (is_opening_frame) {
+    PROFILE_SCOPE_COUNTER(kCpuD3D12BeginSubmissionFrameOpenUs);
     frame_open_ = true;
 
     // Reset bindings that depend on the data stored in the pools.
@@ -3418,12 +3648,17 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
     primitive_processor_->BeginFrame();
 
     texture_cache_->BeginFrame();
+
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+    BeginGpuTimestampFrame();
+#endif
   }
 
   return true;
 }
 
 bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+  PROFILE_SCOPE_COUNTER(kCpuD3D12EndSubmissionUs);
   const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
 
   // Make sure there is a command allocator to write commands to.
@@ -3446,9 +3681,16 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
   bool is_closing_frame = is_swap && frame_open_;
 
   if (is_closing_frame) {
-    texture_cache_->EndFrame();
+    {
+      PROFILE_SCOPE_COUNTER(kCpuD3D12EndFrameUs);
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+      EndGpuTimestampFrame();
+#endif
 
-    primitive_processor_->EndFrame();
+      texture_cache_->EndFrame();
+
+      primitive_processor_->EndFrame();
+    }
   }
 
   if (submission_open_) {
@@ -3460,7 +3702,10 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
       active_occlusion_query_ = {};
     }
 
-    pipeline_cache_->EndSubmission();
+    {
+      PROFILE_SCOPE_COUNTER(kCpuD3D12PipelineEndUs);
+      pipeline_cache_->EndSubmission();
+    }
 
     // Submit barriers now because resources with the queued barriers may be
     // destroyed between frames.
@@ -3477,10 +3722,24 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
         command_allocator_writable_first_->command_allocator;
     command_allocator->Reset();
     command_list_->Reset(command_allocator, nullptr);
-    deferred_command_list_.Execute(command_list_, command_list_1_);
-    command_list_->Close();
+    {
+      PROFILE_SCOPE_COUNTER(kCpuD3D12DeferredExecuteUs);
+      deferred_command_list_.Execute(command_list_, command_list_1_);
+    }
+    if (is_closing_frame) {
+#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+      ResolveGpuTimestampFrame(command_list_);
+#endif
+    }
+    {
+      PROFILE_SCOPE_COUNTER(kCpuD3D12CommandListCloseUs);
+      command_list_->Close();
+    }
     ID3D12CommandList* execute_command_lists[] = {command_list_};
-    direct_queue->ExecuteCommandLists(1, execute_command_lists);
+    {
+      PROFILE_SCOPE_COUNTER(kCpuD3D12ExecuteCommandListsUs);
+      direct_queue->ExecuteCommandLists(1, execute_command_lists);
+    }
     command_allocator_writable_first_->last_usage_submission = submission_current_;
     if (command_allocator_submitted_last_) {
       command_allocator_submitted_last_->next = command_allocator_writable_first_;
@@ -3494,7 +3753,10 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
       command_allocator_writable_last_ = nullptr;
     }
 
-    direct_queue->Signal(submission_fence_, submission_current_++);
+    {
+      PROFILE_SCOPE_COUNTER(kCpuD3D12SignalUs);
+      direct_queue->Signal(submission_fence_, submission_current_++);
+    }
 
     submission_open_ = false;
 
@@ -3517,7 +3779,15 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     }
     frame_open_ = false;
     // Submission already closed now, so minus 1.
-    closed_frame_submissions_[(frame_current_++) % kQueueFrames] = submission_current_ - 1;
+    {
+      const uint64_t closed_frame = frame_current_;
+      const uint64_t closed_submission = submission_current_ - 1;
+      closed_frame_submissions_[(frame_current_++) % kQueueFrames] = closed_submission;
+      GpuTimestampFrame& timestamp_frame = gpu_timestamp_frames_[closed_frame % kQueueFrames];
+      if (timestamp_frame.pending && timestamp_frame.frame == closed_frame) {
+        timestamp_frame.submission = closed_submission;
+      }
+    }
 
     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
       cache_clear_requested_ = false;
@@ -4860,6 +5130,277 @@ ID3D12Resource* D3D12CommandProcessor::RequestReadbackBuffer(uint32_t size) {
     readback_buffer_size_ = size;
   }
   return readback_buffer_;
+}
+
+bool D3D12CommandProcessor::InitializeGpuTimestampResources() {
+  gpu_timestamp_resources_available_ = false;
+  gpu_timestamp_query_heap_.Reset();
+  gpu_timestamp_readback_.Reset();
+  gpu_timestamp_readback_mapping_ = nullptr;
+  gpu_timestamp_frequency_ = 0;
+  for (auto& frame : gpu_timestamp_frames_) {
+    frame = {};
+  }
+
+  const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
+  ID3D12CommandQueue* direct_queue = provider.GetDirectQueue();
+  if (!device || !direct_queue) {
+    return false;
+  }
+  if (FAILED(direct_queue->GetTimestampFrequency(&gpu_timestamp_frequency_)) ||
+      gpu_timestamp_frequency_ == 0) {
+    REXGPU_WARN("D3D12CommandProcessor: GPU timestamp frequency is unavailable");
+    return false;
+  }
+
+  D3D12_QUERY_HEAP_DESC heap_desc;
+  heap_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+  heap_desc.Count = kMaxGpuTimestampQueriesPerFrame * kQueueFrames;
+  heap_desc.NodeMask = 0;
+  if (FAILED(device->CreateQueryHeap(&heap_desc, IID_PPV_ARGS(&gpu_timestamp_query_heap_)))) {
+    REXGPU_WARN("D3D12CommandProcessor: Failed to create GPU timestamp query heap");
+    return false;
+  }
+
+  D3D12_RESOURCE_DESC buffer_desc;
+  ui::d3d12::util::FillBufferResourceDesc(
+      buffer_desc, sizeof(uint64_t) * kMaxGpuTimestampQueriesPerFrame * kQueueFrames,
+      D3D12_RESOURCE_FLAG_NONE);
+  if (FAILED(device->CreateCommittedResource(&ui::d3d12::util::kHeapPropertiesReadback,
+                                             provider.GetHeapFlagCreateNotZeroed(), &buffer_desc,
+                                             D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&gpu_timestamp_readback_)))) {
+    REXGPU_WARN("D3D12CommandProcessor: Failed to allocate GPU timestamp readback buffer");
+    gpu_timestamp_query_heap_.Reset();
+    return false;
+  }
+
+  D3D12_RANGE read_range = {0, sizeof(uint64_t) * kMaxGpuTimestampQueriesPerFrame * kQueueFrames};
+  void* mapping = nullptr;
+  if (FAILED(gpu_timestamp_readback_->Map(0, &read_range, &mapping))) {
+    REXGPU_WARN("D3D12CommandProcessor: Failed to map GPU timestamp readback buffer");
+    gpu_timestamp_readback_.Reset();
+    gpu_timestamp_query_heap_.Reset();
+    return false;
+  }
+
+  gpu_timestamp_readback_mapping_ = reinterpret_cast<uint64_t*>(mapping);
+  return true;
+}
+
+void D3D12CommandProcessor::ShutdownGpuTimestampResources() {
+  if (gpu_timestamp_readback_ && gpu_timestamp_readback_mapping_) {
+    gpu_timestamp_readback_->Unmap(0, nullptr);
+  }
+  gpu_timestamp_readback_mapping_ = nullptr;
+  gpu_timestamp_readback_.Reset();
+  gpu_timestamp_query_heap_.Reset();
+  gpu_timestamp_frequency_ = 0;
+  gpu_timestamp_resources_available_ = false;
+  for (auto& frame : gpu_timestamp_frames_) {
+    frame = {};
+  }
+}
+
+void D3D12CommandProcessor::BeginGpuTimestampFrame() {
+  if (!gpu_timestamp_resources_available_) {
+    return;
+  }
+  GpuTimestampFrame& frame = gpu_timestamp_frames_[frame_current_ % kQueueFrames];
+  frame.frame = frame_current_;
+  frame.submission = 0;
+  frame.query_base = uint32_t((frame_current_ % kQueueFrames) * kMaxGpuTimestampQueriesPerFrame);
+  frame.query_count = 0;
+  frame.frame_start_query = UINT32_MAX;
+  frame.frame_end_query = UINT32_MAX;
+  frame.pending = false;
+  frame.buckets.clear();
+  frame.bucket_start_queries.clear();
+  frame.counter_ids.clear();
+  frame.counter_start_queries.clear();
+  if (rex::perf::IsCaptureRecording() && gpu_timestamp_query_heap_) {
+    frame.frame_start_query = frame.query_count++;
+    deferred_command_list_.D3DEndQuery(gpu_timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                       frame.query_base + frame.frame_start_query);
+  }
+}
+
+void D3D12CommandProcessor::EndGpuTimestampFrame() {
+  if (!gpu_timestamp_resources_available_ || !gpu_timestamp_query_heap_ || !gpu_timestamp_readback_) {
+    return;
+  }
+  GpuTimestampFrame& frame = gpu_timestamp_frames_[frame_current_ % kQueueFrames];
+  if (frame.frame != frame_current_ || !frame.query_count) {
+    return;
+  }
+}
+
+void D3D12CommandProcessor::ResolveGpuTimestampFrame(ID3D12GraphicsCommandList* command_list) {
+  if (!gpu_timestamp_resources_available_ || !gpu_timestamp_query_heap_ ||
+      !gpu_timestamp_readback_ || !command_list) {
+    return;
+  }
+  GpuTimestampFrame& frame = gpu_timestamp_frames_[frame_current_ % kQueueFrames];
+  if (frame.frame != frame_current_ || !frame.query_count) {
+    return;
+  }
+  if (frame.frame_start_query != UINT32_MAX &&
+      frame.query_count < kMaxGpuTimestampQueriesPerFrame) {
+    frame.frame_end_query = frame.query_count++;
+    command_list->EndQuery(gpu_timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                           frame.query_base + frame.frame_end_query);
+  }
+  command_list->ResolveQueryData(gpu_timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                 frame.query_base, frame.query_count,
+                                 gpu_timestamp_readback_.Get(),
+                                 sizeof(uint64_t) * frame.query_base);
+  frame.pending = true;
+}
+
+void D3D12CommandProcessor::ProcessGpuTimestampResults() {
+  if (!gpu_timestamp_resources_available_ || !gpu_timestamp_readback_mapping_ ||
+      !gpu_timestamp_frequency_) {
+    return;
+  }
+
+  for (GpuTimestampFrame& frame : gpu_timestamp_frames_) {
+    if (!frame.pending || frame.submission == 0 || frame.submission > submission_completed_) {
+      continue;
+    }
+    const uint64_t* timestamps = gpu_timestamp_readback_mapping_ + frame.query_base;
+    if (frame.frame_start_query != UINT32_MAX && frame.frame_end_query != UINT32_MAX) {
+      uint64_t start = timestamps[frame.frame_start_query];
+      uint64_t end = timestamps[frame.frame_end_query];
+      if (end > start) {
+        int64_t elapsed_us =
+            static_cast<int64_t>((end - start) * uint64_t(1000000) / gpu_timestamp_frequency_);
+        rex::perf::IncrementCounter(rex::perf::CounterId::kGpuCommandProcessorFrameUs,
+                                    elapsed_us);
+        rex::perf::IncrementCounter(rex::perf::CounterId::kGpuTimestampedFrames);
+      }
+    }
+    for (uint32_t i = 0; i < frame.buckets.size(); ++i) {
+      if (i >= frame.bucket_start_queries.size()) {
+        break;
+      }
+      uint32_t start_query = frame.bucket_start_queries[i];
+      if (start_query + 1 >= frame.query_count) {
+        continue;
+      }
+      uint64_t start = timestamps[start_query];
+      uint64_t end = timestamps[start_query + 1];
+      if (end <= start) {
+        continue;
+      }
+      int64_t elapsed_us =
+          static_cast<int64_t>((end - start) * uint64_t(1000000) / gpu_timestamp_frequency_);
+      rex::perf::CounterId counter_id;
+      switch (frame.buckets[i]) {
+        case rex::perf::DrawBucket::kMainColorDepth:
+          counter_id = rex::perf::CounterId::kGpuMainUs;
+          break;
+        case rex::perf::DrawBucket::kDepthOnly:
+          counter_id = rex::perf::CounterId::kGpuDepthUs;
+          break;
+        case rex::perf::DrawBucket::kCopyResolve:
+          counter_id = rex::perf::CounterId::kGpuCopyUs;
+          break;
+        case rex::perf::DrawBucket::kMemexport:
+          counter_id = rex::perf::CounterId::kGpuMemexportUs;
+          break;
+        case rex::perf::DrawBucket::kNoPixelShader:
+          counter_id = rex::perf::CounterId::kGpuNoPixelShaderUs;
+          break;
+        default:
+          continue;
+      }
+      rex::perf::IncrementCounter(counter_id, elapsed_us);
+    }
+    for (uint32_t i = 0; i < frame.counter_ids.size(); ++i) {
+      if (i >= frame.counter_start_queries.size()) {
+        break;
+      }
+      uint32_t start_query = frame.counter_start_queries[i];
+      if (start_query + 1 >= frame.query_count) {
+        continue;
+      }
+      uint64_t start = timestamps[start_query];
+      uint64_t end = timestamps[start_query + 1];
+      if (end <= start) {
+        continue;
+      }
+      int64_t elapsed_us =
+          static_cast<int64_t>((end - start) * uint64_t(1000000) / gpu_timestamp_frequency_);
+      rex::perf::IncrementCounter(frame.counter_ids[i], elapsed_us);
+    }
+    frame.pending = false;
+    frame.buckets.clear();
+    frame.bucket_start_queries.clear();
+    frame.counter_ids.clear();
+    frame.counter_start_queries.clear();
+  }
+}
+
+uint32_t D3D12CommandProcessor::BeginGpuTimestampedDraw(rex::perf::DrawBucket bucket) {
+  if (!gpu_timestamp_resources_available_ || !gpu_timestamp_query_heap_ ||
+      !rex::perf::IsCaptureRecording() || !frame_open_) {
+    return UINT32_MAX;
+  }
+
+  GpuTimestampFrame& frame = gpu_timestamp_frames_[frame_current_ % kQueueFrames];
+  if (frame.frame != frame_current_ ||
+      frame.query_count + 2 > kMaxGpuTimestampQueriesPerFrame) {
+    return UINT32_MAX;
+  }
+  uint32_t start_query = frame.query_base + frame.query_count;
+  uint32_t start_query_relative = frame.query_count;
+  frame.query_count += 2;
+  frame.buckets.push_back(bucket);
+  frame.bucket_start_queries.push_back(start_query_relative);
+  deferred_command_list_.D3DEndQuery(gpu_timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                     start_query);
+  PROFILE_GPU_TIMESTAMPED_DRAW();
+  return start_query;
+}
+
+void D3D12CommandProcessor::EndGpuTimestampedDraw(uint32_t start_query_index) {
+  if (start_query_index == UINT32_MAX || !gpu_timestamp_query_heap_) {
+    return;
+  }
+  deferred_command_list_.D3DEndQuery(gpu_timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                     start_query_index + 1);
+}
+
+uint32_t D3D12CommandProcessor::BeginGpuTimestampedCounter(
+    ID3D12GraphicsCommandList* command_list, rex::perf::CounterId counter_id) {
+  if (!gpu_timestamp_resources_available_ || !gpu_timestamp_query_heap_ ||
+      !rex::perf::IsCaptureRecording() || !frame_open_ || !command_list) {
+    return UINT32_MAX;
+  }
+
+  GpuTimestampFrame& frame = gpu_timestamp_frames_[frame_current_ % kQueueFrames];
+  if (frame.frame != frame_current_ ||
+      frame.query_count + 2 > kMaxGpuTimestampQueriesPerFrame) {
+    return UINT32_MAX;
+  }
+  uint32_t start_query = frame.query_base + frame.query_count;
+  uint32_t start_query_relative = frame.query_count;
+  frame.query_count += 2;
+  frame.counter_ids.push_back(counter_id);
+  frame.counter_start_queries.push_back(start_query_relative);
+  command_list->EndQuery(gpu_timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                         start_query);
+  return start_query;
+}
+
+void D3D12CommandProcessor::EndGpuTimestampedCounter(ID3D12GraphicsCommandList* command_list,
+                                                     uint32_t start_query_index) {
+  if (start_query_index == UINT32_MAX || !gpu_timestamp_query_heap_ || !command_list) {
+    return;
+  }
+  command_list->EndQuery(gpu_timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                         start_query_index + 1);
 }
 
 bool D3D12CommandProcessor::InitializeOcclusionQueryResources() {
