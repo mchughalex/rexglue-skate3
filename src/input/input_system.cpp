@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include <rex/dbg.h>
 #include <rex/input/flags.h>
@@ -22,7 +23,7 @@
 #include <rex/input/xinput/xinput_input_driver.h>
 #include <rex/logging.h>
 
-REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput")
+REXCVAR_DEFINE_STRING(input_backend, "xinput", "Input", "Input backend: sdl, xinput")
     .allowed({"sdl", "xinput"});
 
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
@@ -52,9 +53,14 @@ void InputSystem::AttachWindow(rex::ui::Window* window) {
 }
 
 void InputSystem::SetActiveCallback(std::function<bool()> callback) {
+  active_callback_ = callback;
   for (auto& driver : drivers_) {
     driver->set_is_active_callback(callback);
   }
+}
+
+void InputSystem::SetMenuChordCallback(std::function<void()> callback) {
+  menu_chord_callback_ = std::move(callback);
 }
 
 X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
@@ -118,6 +124,18 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
 
   if (first_result) {
     return any_connected ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
+  constexpr uint16_t kMenuChordButtons = X_INPUT_GAMEPAD_BACK | X_INPUT_GAMEPAD_START;
+  const bool menu_chord_down =
+      (static_cast<uint16_t>(merged.gamepad.buttons) & kMenuChordButtons) == kMenuChordButtons;
+  if (menu_chord_down && !menu_chord_down_ && menu_chord_callback_) {
+    menu_chord_callback_();
+  }
+  menu_chord_down_ = menu_chord_down;
+
+  if (active_callback_ && !active_callback_()) {
+    std::memset(&merged.gamepad, 0, sizeof(merged.gamepad));
   }
 
   if (out_state) {

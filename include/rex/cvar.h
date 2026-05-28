@@ -91,6 +91,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -109,6 +110,8 @@ void ApplyEnvironment();
 void FinalizeInit();
 bool IsFinalized();
 void SaveConfig(const std::filesystem::path& config_path);
+void SaveConfigValues(const std::filesystem::path& config_path,
+                      std::initializer_list<std::string_view> names);
 
 //=============================================================================
 // Flag Registry

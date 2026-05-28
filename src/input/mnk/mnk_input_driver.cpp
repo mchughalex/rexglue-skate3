@@ -27,6 +27,8 @@
 #endif
 
 REXCVAR_DEFINE_BOOL(mnk_mode, false, "Input", "Enable keyboard/mouse controller emulation");
+REXCVAR_DEFINE_BOOL(mnk_capture_mouse, false, "Input",
+                    "Capture and hide mouse cursor while MnK is active");
 REXCVAR_DEFINE_INT32(mnk_user_index, 0, "Input", "Controller slot (0-3) for MnK").range(0, 3);
 REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, 1.0, "Input", "Mouse sensitivity for right stick")
     .range(0.01, 10.0);
@@ -278,7 +280,7 @@ void MnkInputDriver::UpdateMouseCapture() {
   if (!attached_window_)
     return;
 
-  bool should_capture = IsEnabled() && has_focus_ && is_active();
+  bool should_capture = IsEnabled() && has_focus_ && is_active() && REXCVAR_GET(mnk_capture_mouse);
 
   if (should_capture && !mouse_captured_) {
     mouse_captured_ = true;

@@ -12,7 +12,10 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <atomic>
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 #include <rex/cvar.h>
 #include <rex/kernel/xam/private.h>
@@ -29,12 +32,16 @@
 #include <rex/system/xtypes.h>
 
 REXCVAR_DEFINE_UINT32(user_language, 1, "Kernel", "User's language ID");
+REXCVAR_DEFINE_UINT32(xam_signin_ui_auto_close_ms, 1200, "Kernel",
+                      "Duration to keep the stubbed sign-in UI active before auto-closing");
 
 namespace rex {
 namespace kernel {
 namespace xam {
 using namespace rex::system;
 using namespace rex::system::xam;
+
+extern std::atomic<int> xam_dialogs_shown_;
 
 i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
   assert_true(type_mask == 1 || type_mask == 2 || type_mask == 3 || type_mask == 4 ||
@@ -47,15 +54,17 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
   if (user_index < 4) {
     if (user_index == 0) {
       const auto& user_profile = REX_KERNEL_STATE()->user_profile();
-      auto type = user_profile->type() & type_mask;
-      if (type & (2 | 4)) {
-        // maybe online profile?
-        xuid = user_profile->xuid();
-        result = X_E_SUCCESS;
-      } else if (type & 1) {
-        // maybe offline profile?
-        xuid = user_profile->xuid();
-        result = X_E_SUCCESS;
+      if (user_profile->is_signed_in()) {
+        auto type = user_profile->type() & type_mask;
+        if (type & (2 | 4)) {
+          // maybe online profile?
+          xuid = user_profile->xuid();
+          result = X_E_SUCCESS;
+        } else if (type & 1) {
+          // maybe offline profile?
+          xuid = user_profile->xuid();
+          result = X_E_SUCCESS;
+        }
       }
     }
   } else {
@@ -97,6 +106,10 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
   }
 
   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+  if (!user_profile->is_signed_in()) {
+    return X_E_NO_SUCH_USER;
+  }
+
   info->xuid = user_profile->xuid();
   info->signin_state = user_profile->signin_state();
   rex::string::util_copy_truncating(info->name, user_profile->name(), rex::countof(info->name));
@@ -113,6 +126,13 @@ u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
   }
 
   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+  if (!user_profile->is_signed_in()) {
+    if (buffer && buffer_len) {
+      buffer[0] = '\0';
+    }
+    return X_ERROR_NO_SUCH_USER;
+  }
+
   const auto& user_name = user_profile->name();
   rex::string::util_copy_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
   return X_E_SUCCESS;
@@ -127,11 +147,15 @@ u32 XamUserGetGamerTag_entry(u32 user_index, mapped_wstring buffer, u32 buffer_l
     return X_E_NO_SUCH_USER;
   }
 
+  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+  if (!user_profile->is_signed_in()) {
+    return X_ERROR_NO_SUCH_USER;
+  }
+
   if (!buffer || buffer_len < 16) {
     return X_E_INVALIDARG;
   }
 
-  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
   auto user_name = rex::string::to_utf16(user_profile->name());
   rex::string::util_copy_and_swap_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
   return X_E_SUCCESS;
@@ -154,9 +178,6 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
   } else {
     assert_true(xuid_count == 1);
     assert_not_null(xuids);
-    // TODO(gibbed): allow proper lookup of arbitrary XUIDs
-    const auto& user_profile = REX_KERNEL_STATE()->user_profile();
-    assert_true(static_cast<uint64_t>(xuids[0]) == user_profile->xuid());
     // TODO(gibbed): we assert here, but in case a title passes xuid_count > 1
     // until it's implemented for release builds...
     xuid_count = 1;
@@ -208,6 +229,27 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
     return X_ERROR_INSUFFICIENT_BUFFER;
   }
 
+  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+  if (!user_profile->is_signed_in()) {
+    if (overlapped) {
+      REX_KERNEL_STATE()->CompleteOverlappedImmediateEx(
+          REX_KERNEL_MEMORY()->HostToGuestVirtual(overlapped), X_ERROR_FUNCTION_FAILED,
+          X_E_NO_SUCH_USER, 0);
+      return X_ERROR_IO_PENDING;
+    }
+    return X_ERROR_FUNCTION_FAILED;
+  }
+
+  if (xuids && static_cast<uint64_t>(xuids[0]) != user_profile->xuid()) {
+    if (overlapped) {
+      REX_KERNEL_STATE()->CompleteOverlappedImmediateEx(
+          REX_KERNEL_MEMORY()->HostToGuestVirtual(overlapped), X_ERROR_FUNCTION_FAILED,
+          X_E_NO_SUCH_USER, 0);
+      return X_ERROR_IO_PENDING;
+    }
+    return X_ERROR_FUNCTION_FAILED;
+  }
+
   // Title ID = 0 means us.
   // 0xfffe07d1 = profile?
 
@@ -220,8 +262,6 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
     }
     return X_ERROR_NO_SUCH_USER;
   }
-
-  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
 
   // First call asks for size (fill buffer_size_ptr).
   // Second call asks for buffer contents with that size.
@@ -320,6 +360,14 @@ u32 XamUserWriteProfileSettings_entry(u32 title_id, u32 user_index, u32 setting_
 
   // Update and save settings.
   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+  if (!user_profile->is_signed_in()) {
+    if (overlapped) {
+      REX_KERNEL_STATE()->CompleteOverlappedImmediate(overlapped.guest_address(),
+                                                      X_ERROR_NO_SUCH_USER);
+      return X_ERROR_IO_PENDING;
+    }
+    return X_ERROR_NO_SUCH_USER;
+  }
 
   for (uint32_t n = 0; n < setting_count; ++n) {
     const X_USER_PROFILE_SETTING& setting = settings[n];
@@ -423,7 +471,13 @@ u32 XamUserContentRestrictionCheckAccess_entry(u32 user_index, u32 unk1, u32 unk
 }
 
 u32 XamUserIsOnlineEnabled_entry(u32 user_index) {
-  return 1;
+  if (user_index >= 4) {
+    return 0;
+  }
+  if (user_index != 0) {
+    return 0;
+  }
+  return REX_KERNEL_STATE()->user_profile()->is_live_signed_in() ? 1 : 0;
 }
 
 u32 XamUserGetMembershipTier_entry(u32 user_index) {
@@ -432,6 +486,9 @@ u32 XamUserGetMembershipTier_entry(u32 user_index) {
   }
   if (user_index) {
     return X_ERROR_NO_SUCH_USER;
+  }
+  if (!REX_KERNEL_STATE()->user_profile()->is_live_signed_in()) {
+    return X_ERROR_NOT_LOGGED_ON;
   }
   return 6 /* 6 appears to be Gold */;
 }
@@ -477,14 +534,21 @@ u32 XamUserAreUsersFriends_entry(u32 user_index, u32 unk1, u32 unk2, mapped_u32 
 
 u32 XamShowSigninUI_entry(u32 unk, u32 unk_mask) {
   // Mask values vary. Probably matching user types? Local/remote?
+  KernelState* kernel_state = REX_KERNEL_STATE();
 
-  // To fix game modes that display a 4 profile signin UI (even if playing
-  // alone):
-  // XN_SYS_SIGNINCHANGED
-  REX_KERNEL_STATE()->BroadcastNotification(0x0000000A, 1);
-  // Games seem to sit and loop until we trigger this notification:
-  // XN_SYS_UI (off)
-  REX_KERNEL_STATE()->BroadcastNotification(0x00000009, 0);
+  // Showing sign-in is a system-UI operation. It should not imply that a local
+  // profile has signed in; titles observe the UI notification and then continue
+  // along their signed-out path.
+  kernel_state->BroadcastNotification(0x00000009, 1);
+  ++xam_dialogs_shown_;
+
+  const uint32_t close_delay_ms = REXCVAR_GET(xam_signin_ui_auto_close_ms);
+  std::thread([kernel_state, close_delay_ms]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(close_delay_ms));
+    --xam_dialogs_shown_;
+    kernel_state->BroadcastNotification(0x00000009, 0);
+  }).detach();
+
   return X_ERROR_SUCCESS;
 }
 

@@ -48,11 +48,11 @@ REXCVAR_DEFINE_INT32(presenter_strict_guest_output_backpressure_timeout_ms, 100,
 REXCVAR_DEFINE_BOOL(present_letterbox, true, "UI/Presenter",
                     "Enable letterboxing for non-native aspect ratios");
 
-REXCVAR_DEFINE_INT32(present_safe_area_x, 90, "UI/Presenter",
+REXCVAR_DEFINE_INT32(present_safe_area_x, 100, "UI/Presenter",
                      "Horizontal safe area percentage (0-100)")
     .range(0, 100);
 
-REXCVAR_DEFINE_INT32(present_safe_area_y, 90, "UI/Presenter",
+REXCVAR_DEFINE_INT32(present_safe_area_y, 100, "UI/Presenter",
                      "Vertical safe area percentage (0-100)")
     .range(0, 100);
 

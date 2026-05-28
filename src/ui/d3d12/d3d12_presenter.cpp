@@ -57,12 +57,12 @@ REXCVAR_DEFINE_BOOL(d3d12_present_frame_limiter, false, "UI/D3D12",
                     "Limit host presents with an explicit host-clock cadence before Present")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_DOUBLE(d3d12_present_frame_limiter_fps, 60.0, "UI/D3D12",
+REXCVAR_DEFINE_DOUBLE(d3d12_present_frame_limiter_fps, 120.0, "UI/D3D12",
                       "Target host present rate for d3d12_present_frame_limiter")
     .range(1.0, 1000.0)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_INT32(d3d12_present_frame_limiter_sleep_margin_us, 750, "UI/D3D12",
+REXCVAR_DEFINE_INT32(d3d12_present_frame_limiter_sleep_margin_us, 1000, "UI/D3D12",
                      "How early the present limiter wakes before the target present time")
     .range(0, 5000)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);

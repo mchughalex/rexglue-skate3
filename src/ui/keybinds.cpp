@@ -137,6 +137,12 @@ static const std::unordered_map<std::string, VirtualKey> kKeyNames = {
     {"CapsLock", VirtualKey::kCapital},
     {"NumLock", VirtualKey::kNumLock},
     {"ScrollLock", VirtualKey::kScroll},
+    {"Start", VirtualKey::kXInputPadStart},
+    {"Back", VirtualKey::kXInputPadBack},
+    {"GamepadStart", VirtualKey::kXInputPadStart},
+    {"GamepadBack", VirtualKey::kXInputPadBack},
+    {"GamepadA", VirtualKey::kXInputPadA},
+    {"GamepadB", VirtualKey::kXInputPadB},
     // Mouse buttons
     {"LMB", VirtualKey::kLButton},
     {"RMB", VirtualKey::kRButton},

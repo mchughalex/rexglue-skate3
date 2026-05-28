@@ -11,6 +11,7 @@
  */
 
 #include <memory>
+#include <functional>
 #include <vector>
 
 #include <rex/input/input.h>
@@ -36,6 +37,7 @@ class InputSystem : public system::IInputSystem {
   void AddDriver(std::unique_ptr<InputDriver> driver);
   void AttachWindow(rex::ui::Window* window);
   void SetActiveCallback(std::function<bool()> callback);
+  void SetMenuChordCallback(std::function<void()> callback);
 
   X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags, X_INPUT_CAPABILITIES* out_caps);
   X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state);
@@ -46,6 +48,9 @@ class InputSystem : public system::IInputSystem {
   rex::ui::Window* window_ = nullptr;
 
   std::vector<std::unique_ptr<InputDriver>> drivers_;
+  std::function<bool()> active_callback_ = nullptr;
+  std::function<void()> menu_chord_callback_ = nullptr;
+  bool menu_chord_down_ = false;
 };
 
 /// Create a default InputSystem with SDL + NOP drivers.

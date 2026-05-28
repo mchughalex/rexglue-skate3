@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <mutex>
 #include <unordered_map>
 
@@ -86,6 +87,72 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
       }
     }
   }
+}
+
+bool WriteConfigValue(toml::table& config, const FlagEntry& entry, const std::string& value) {
+  switch (entry.type) {
+    case FlagType::Boolean:
+      config.insert_or_assign(entry.name, value == "true" || value == "1" || value == "yes");
+      return true;
+    case FlagType::Int32:
+    case FlagType::Int64: {
+      int64_t parsed = 0;
+      auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+      if (ec == std::errc()) {
+        config.insert_or_assign(entry.name, parsed);
+        return true;
+      }
+      return false;
+    }
+    case FlagType::Uint32:
+    case FlagType::Uint64: {
+      uint64_t parsed = 0;
+      auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+      if (ec == std::errc()) {
+        if (parsed <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+          config.insert_or_assign(entry.name, static_cast<int64_t>(parsed));
+        } else {
+          config.insert_or_assign(entry.name, value);
+        }
+        return true;
+      }
+      return false;
+    }
+    case FlagType::Double: {
+      double parsed = 0.0;
+      if (ParseDouble(value, parsed)) {
+        config.insert_or_assign(entry.name, parsed);
+        return true;
+      }
+      return false;
+    }
+    case FlagType::String:
+      config.insert_or_assign(entry.name, value);
+      return true;
+    case FlagType::Command:
+      return false;
+  }
+  return false;
+}
+
+bool WriteConfigFile(const std::filesystem::path& config_path, const toml::table& config) {
+  if (auto parent = config_path.parent_path(); !parent.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+      REXLOG_ERROR("SaveConfig: failed to create {}: {}", parent.string(), ec.message());
+      return false;
+    }
+  }
+
+  std::ofstream file(config_path);
+  if (!file) {
+    REXLOG_ERROR("SaveConfig: failed to open {}", config_path.string());
+    return false;
+  }
+  file << "# Auto-generated cvar configuration\n";
+  file << config;
+  return true;
 }
 
 // todo(tomc): move restart manager to Runtime
@@ -552,46 +619,7 @@ void SaveConfig(const std::filesystem::path& config_path) {
         }
 
         const std::string value = entry.getter();
-        switch (entry.type) {
-          case FlagType::Boolean:
-            config.insert_or_assign(entry.name, value == "true" || value == "1" || value == "yes");
-            break;
-          case FlagType::Int32:
-          case FlagType::Int64: {
-            int64_t parsed = 0;
-            auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
-            if (ec == std::errc()) {
-              config.insert_or_assign(entry.name, parsed);
-            }
-            break;
-          }
-          case FlagType::Uint32:
-          case FlagType::Uint64: {
-            uint64_t parsed = 0;
-            auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
-            if (ec == std::errc()) {
-              if (parsed <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-                config.insert_or_assign(entry.name, static_cast<int64_t>(parsed));
-              } else {
-                config.insert_or_assign(entry.name, value);
-              }
-            }
-            break;
-          }
-          case FlagType::Double: {
-            double parsed = 0.0;
-            if (ParseDouble(value, parsed)) {
-              config.insert_or_assign(entry.name, parsed);
-            }
-            break;
-          }
-          case FlagType::String:
-            config.insert_or_assign(entry.name, value);
-            break;
-          case FlagType::Command:
-            continue;
-        }
-        modified = true;
+        modified |= WriteConfigValue(config, entry, value);
       }
 
       if (!modified) {
@@ -600,14 +628,43 @@ void SaveConfig(const std::filesystem::path& config_path) {
       }
     }
 
-    std::ofstream file(config_path);
-    if (!file) {
-      REXLOG_ERROR("SaveConfig: failed to open {}", config_path.string());
-      return;
+    if (WriteConfigFile(config_path, config)) {
+      REXLOG_INFO("Saved config to {}", config_path.string());
     }
-    file << "# Auto-generated cvar configuration\n";
-    file << config;
-    REXLOG_INFO("Saved config to {}", config_path.string());
+  } catch (const std::exception& e) {
+    REXLOG_ERROR("SaveConfig: {}", e.what());
+  }
+}
+
+void SaveConfigValues(const std::filesystem::path& config_path,
+                      std::initializer_list<std::string_view> names) {
+  try {
+    toml::table config;
+    if (std::filesystem::exists(config_path)) {
+      config = toml::parse_file(config_path.string());
+    }
+
+    {
+      std::lock_guard lock(GetRegistryMutex());
+      auto& index = GetRegistryIndex();
+      auto& registry = GetRegistryStorage();
+      for (std::string_view name : names) {
+        auto it = index.find(std::string(name));
+        if (it == index.end()) {
+          REXLOG_WARN("SaveConfigValues: unknown cvar '{}'", name);
+          continue;
+        }
+        const auto& entry = registry[it->second];
+        if (entry.type == FlagType::Command) {
+          continue;
+        }
+        WriteConfigValue(config, entry, entry.getter());
+      }
+    }
+
+    if (WriteConfigFile(config_path, config)) {
+      REXLOG_INFO("Saved config to {}", config_path.string());
+    }
   } catch (const std::exception& e) {
     REXLOG_ERROR("SaveConfig: {}", e.what());
   }

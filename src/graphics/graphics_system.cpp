@@ -51,7 +51,7 @@ REXCVAR_DEFINE_BOOL(vblank_host_clock_pacing, false, "GPU",
                     "polling the guest clock")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_INT32(vblank_precise_sleep_margin_us, 750, "GPU",
+REXCVAR_DEFINE_INT32(vblank_precise_sleep_margin_us, 1000, "GPU",
                      "How early the vblank worker should wake before the target for precise wait")
     .range(0, 5000)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -59,6 +59,10 @@ REXCVAR_DEFINE_INT32(vblank_precise_sleep_margin_us, 750, "GPU",
 REXCVAR_DEFINE_INT32(vblank_precise_spin_us, 150, "GPU",
                      "Final vblank wait window that should busy-spin for tighter pacing")
     .range(0, 1000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(vblank_no_vsync_use_present_limiter, false, "GPU",
+                    "Use the host present limiter FPS as the guest no-vsync vblank cadence")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace {
@@ -218,11 +222,21 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
         uint64_t guest_tick_frequency = chrono::Clock::guest_tick_frequency();
         uint64_t vsync_interval_ticks =
             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
-        uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
         uint64_t host_tick_frequency = chrono::Clock::QueryHostTickFrequency();
         uint64_t vsync_interval_host_ticks =
             std::max(uint64_t(1), uint64_t(double(host_tick_frequency) / refresh_rate_hz));
-        uint64_t no_vsync_interval_host_ticks = std::max(uint64_t(1), host_tick_frequency / 1000);
+        auto get_no_vsync_interval_ticks = [](uint64_t frequency) {
+          double no_vsync_rate_hz = 1000.0;
+          if (REXCVAR_GET(vblank_no_vsync_use_present_limiter) &&
+              rex::cvar::Query<bool>("d3d12_present_frame_limiter")) {
+            no_vsync_rate_hz =
+                std::clamp(rex::cvar::Query<double>("d3d12_present_frame_limiter_fps"), 1.0,
+                           1000.0);
+          }
+          return std::max(uint64_t(1), uint64_t(double(frequency) / no_vsync_rate_hz));
+        };
+        uint64_t no_vsync_interval_ticks = get_no_vsync_interval_ticks(guest_tick_frequency);
+        uint64_t no_vsync_interval_host_ticks = get_no_vsync_interval_ticks(host_tick_frequency);
         uint64_t initial_interval_ticks =
             REXCVAR_GET(vsync) ? vsync_interval_ticks : no_vsync_interval_ticks;
         uint64_t next_frame_time = chrono::Clock::QueryGuestTickCount() + initial_interval_ticks;
@@ -232,6 +246,8 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
         while (vsync_worker_running_) {
           if (REXCVAR_GET(vblank_host_clock_pacing)) {
             bool vsync_enabled = REXCVAR_GET(vsync);
+            no_vsync_interval_ticks = get_no_vsync_interval_ticks(guest_tick_frequency);
+            no_vsync_interval_host_ticks = get_no_vsync_interval_ticks(host_tick_frequency);
             uint64_t interval_ticks =
                 vsync_enabled ? vsync_interval_ticks : no_vsync_interval_ticks;
             uint64_t interval_host_ticks =
@@ -266,6 +282,7 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
 
           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
           bool vsync_enabled = REXCVAR_GET(vsync);
+          no_vsync_interval_ticks = get_no_vsync_interval_ticks(guest_tick_frequency);
           uint64_t interval_ticks = vsync_enabled ? vsync_interval_ticks : no_vsync_interval_ticks;
 
           if (current_time >= next_frame_time) {

@@ -9,6 +9,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
+
 #include <rex/assert.h>
 #include <rex/audio/audio_driver.h>
 #include <rex/audio/audio_system.h>
@@ -25,8 +27,33 @@
 #include <rex/cvar.h>
 
 REXCVAR_DEFINE_INT32(
-    audio_maxqframes, 8, "Audio",
+    audio_maxqframes, 16, "Audio",
     "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
+
+REXCVAR_DEFINE_INT32(audio_worker_thread_priority, 0, "Audio",
+                     "Native audio worker thread priority (-2 lowest, -1 below normal, 0 normal, "
+                     "1 above normal, 2 highest)")
+    .range(-2, 2);
+
+namespace {
+
+int32_t AudioWorkerNativePriority() {
+  switch (std::clamp(REXCVAR_GET(audio_worker_thread_priority), -2, 2)) {
+    case -2:
+      return rex::thread::ThreadPriority::kLowest;
+    case -1:
+      return rex::thread::ThreadPriority::kBelowNormal;
+    case 1:
+      return rex::thread::ThreadPriority::kAboveNormal;
+    case 2:
+      return rex::thread::ThreadPriority::kHighest;
+    case 0:
+    default:
+      return rex::thread::ThreadPriority::kNormal;
+  }
+}
+
+}  // namespace
 
 // As with normal Microsoft, there are like twelve different ways to access
 // the audio APIs. Early games use XMA*() methods almost exclusively to touch
@@ -88,6 +115,9 @@ X_STATUS AudioSystem::Setup(system::KernelState* kernel_state) {
 
   worker_thread_->set_name("Audio Worker");
   worker_thread_->Create();
+  if (worker_thread_->thread()) {
+    worker_thread_->thread()->set_priority(AudioWorkerNativePriority());
+  }
 
   return X_STATUS_SUCCESS;
 }

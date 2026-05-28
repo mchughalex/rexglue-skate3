@@ -28,22 +28,22 @@
 #include <rex/math.h>
 #include <rex/perf/counter.h>
 
-REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 24, "GPU",
+REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 128, "GPU",
                      "Texture cache memory limit for render-to-texture (MB)")
     .range(1, 256)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_INT32(texture_cache_memory_limit_soft, 384, "GPU",
+REXCVAR_DEFINE_INT32(texture_cache_memory_limit_soft, 2048, "GPU",
                      "Soft texture cache memory limit (MB)")
     .range(64, 4096)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_INT32(texture_cache_memory_limit_hard, 768, "GPU",
+REXCVAR_DEFINE_INT32(texture_cache_memory_limit_hard, 4096, "GPU",
                      "Hard texture cache memory limit (MB)")
     .range(128, 8192)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_INT32(texture_cache_memory_limit_soft_lifetime, 30, "GPU",
+REXCVAR_DEFINE_INT32(texture_cache_memory_limit_soft_lifetime, 300, "GPU",
                      "Soft texture cache memory limit lifetime (seconds)")
     .range(1, 3600);
 
@@ -51,7 +51,7 @@ REXCVAR_DEFINE_BOOL(gpu_3d_to_2d_texture, true, "GPU",
                     "Sample problematic 3D textures through 2D-compatible wrappers")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_INT32(anisotropic_override, 3, "GPU",
+REXCVAR_DEFINE_INT32(anisotropic_override, -1, "GPU",
                      "Forces anisotropic filtering for eligible textures.\n"
                      "Higher values keep textures sharper at oblique angles, but increase texture "
                      "sampling cost.\n"
@@ -65,15 +65,15 @@ REXCVAR_DEFINE_INT32(anisotropic_override, 3, "GPU",
     .range(-1, 5)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_INT32(draw_resolution_scale_x, 1, "GPU", "Draw resolution scale X (1 = no scaling)")
+REXCVAR_DEFINE_INT32(draw_resolution_scale_x, 2, "GPU", "Draw resolution scale X (1 = no scaling)")
     .range(1, 8)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_INT32(draw_resolution_scale_y, 1, "GPU", "Draw resolution scale Y (1 = no scaling)")
+REXCVAR_DEFINE_INT32(draw_resolution_scale_y, 2, "GPU", "Draw resolution scale Y (1 = no scaling)")
     .range(1, 8)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_INT32(resolution_scale, 1, "GPU",
+REXCVAR_DEFINE_INT32(resolution_scale, 2, "GPU",
                      "Draw resolution scale for both X and Y axes (same as setting "
                      "draw_resolution_scale_x and draw_resolution_scale_y)")
     .range(1, 8)

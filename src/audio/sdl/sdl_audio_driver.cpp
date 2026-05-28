@@ -118,6 +118,7 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
 
   static uint32_t sdl_submit_count = 0;
   if (sdl_submit_count < 10) {
+    std::unique_lock<std::mutex> guard(frames_mutex_);
     REXAPU_DEBUG("SDLAudioDriver::SubmitFrame: frame_ptr={:08X} queued_count={}", frame_ptr,
                  frames_queued_.size() + 1);
     sdl_submit_count++;
@@ -168,8 +169,17 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
   }
   while (additional_amount > 0) {
     static uint32_t sdl_callback_count = 0;
-    std::unique_lock<std::mutex> guard(driver->frames_mutex_);
-    if (driver->frames_queued_.empty()) {
+    float* buffer = nullptr;
+    {
+      std::unique_lock<std::mutex> guard(driver->frames_mutex_);
+      if (!driver->frames_queued_.empty()) {
+        buffer = driver->frames_queued_.front();
+        driver->frames_queued_.pop();
+        PROFILE_BUFFER_QUEUE_DEPTH(static_cast<int64_t>(driver->frames_queued_.size()));
+      }
+    }
+
+    if (!buffer) {
       if (sdl_callback_count < 10) {
         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
         sdl_callback_count++;
@@ -181,8 +191,6 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
       }
       additional_amount -= len;
     } else {
-      auto buffer = driver->frames_queued_.front();
-      driver->frames_queued_.pop();
       if (REXCVAR_GET(audio_mute)) {
         std::memset(data, 0, len);
       } else {
@@ -198,12 +206,15 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
             break;
         }
       }
-      if (!SDL_PutAudioStreamData(stream, data, len)) {
-        REXAPU_ERROR("SDL_PutAudioStreamData() failed: {}", SDL_GetError());
+      bool submitted = SDL_PutAudioStreamData(stream, data, len);
+      {
+        std::unique_lock<std::mutex> guard(driver->frames_mutex_);
         driver->frames_unused_.push(buffer);
+      }
+      if (!submitted) {
+        REXAPU_ERROR("SDL_PutAudioStreamData() failed: {}", SDL_GetError());
         break;
       }
-      driver->frames_unused_.push(buffer);
 
       auto ret = driver->semaphore_->Release(1, nullptr);
       assert_true(ret);

@@ -176,7 +176,7 @@ struct XNetStartupParams {
   uint8_t cfgQosPairWaitTimeInSeconds;
 };
 
-XNetStartupParams xnet_startup_params = {};
+XNetStartupParams xnet_startup_params = {0};
 
 u32 NetDll_XNetStartup_entry(u32 caller, ppc_ptr_t<XNetStartupParams> params) {
   if (params) {
@@ -794,20 +794,20 @@ struct host_set {
 i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
                         ppc_ptr_t<x_fd_set> writefds, ppc_ptr_t<x_fd_set> exceptfds,
                         mapped_void timeout_ptr) {
-  host_set host_readfds = {};
-  fd_set native_readfds = {};
+  host_set host_readfds = {0};
+  fd_set native_readfds = {0};
   if (readfds) {
     host_readfds.Load(readfds);
     host_readfds.Store(&native_readfds);
   }
-  host_set host_writefds = {};
-  fd_set native_writefds = {};
+  host_set host_writefds = {0};
+  fd_set native_writefds = {0};
   if (writefds) {
     host_writefds.Load(writefds);
     host_writefds.Store(&native_writefds);
   }
-  host_set host_exceptfds = {};
-  fd_set native_exceptfds = {};
+  host_set host_exceptfds = {0};
+  fd_set native_exceptfds = {0};
   if (exceptfds) {
     host_exceptfds.Load(exceptfds);
     host_exceptfds.Store(&native_exceptfds);

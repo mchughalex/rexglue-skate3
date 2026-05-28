@@ -35,9 +35,9 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
 
-REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+REXCVAR_DEFINE_BOOL(vsync, false, "GPU", "Enable vertical sync");
 
-REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
+REXCVAR_DEFINE_BOOL(clear_memory_page_state, false, "GPU",
                     "Refresh page-valid state from GPU-written memory at frame end. "
                     "Disable for minor CPU overhead reduction, but may break memory coherency.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -59,7 +59,7 @@ REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
                     "scaled block during resolve readback downscale")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_BOOL(readback_memexport, true, "GPU",
+REXCVAR_DEFINE_BOOL(readback_memexport, false, "GPU",
                     "Enable CPU readback of shader memexport writes for guest memory "
                     "coherency (can reduce correctness issues, but may add GPU/CPU sync cost)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);

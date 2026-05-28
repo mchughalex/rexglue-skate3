@@ -11,6 +11,7 @@
 
 #include <rex/rex_app.h>
 
+#include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/ui/flags.h>
 #include <rex/kernel/crt/heap.h>
@@ -40,12 +41,17 @@
 
 #include <fmt/format.h>
 #include <imgui.h>
+#include <toml++/toml.hpp>
 
 #include <algorithm>
 #include <filesystem>
+#include <optional>
 #include <string_view>
 
 namespace rex {
+
+REXCVAR_DEFINE_BOOL(advanced_settings_overlay_enabled, false, "UI/Advanced",
+                    "Enable the developer cvar browser on F4");
 
 // --- ReXApp ---
 
@@ -76,8 +82,37 @@ bool ReXApp::OnInitialize() {
 
 bool ReXApp::SetupEnvironment() {
   auto exe_dir = rex::filesystem::GetExecutableFolder();
+  auto config_path = exe_dir / (std::string(GetName()) + ".toml");
+
+  // Load config before resolving cvar-backed paths such as game_data_root.
+  if (std::filesystem::exists(config_path))
+    rex::cvar::LoadConfig(config_path);
+
+  toml::table config_table;
+  bool has_config_table = false;
+  if (std::filesystem::exists(config_path)) {
+    try {
+      config_table = toml::parse_file(config_path.string());
+      has_config_table = true;
+    } catch (const toml::parse_error&) {
+      has_config_table = false;
+    }
+  }
+
+  auto config_string = [&](std::string_view key) -> std::optional<std::string> {
+    if (!has_config_table) {
+      return std::nullopt;
+    }
+    if (auto value = config_table[key].value<std::string>()) {
+      return *value;
+    }
+    return std::nullopt;
+  };
 
   std::filesystem::path game_dir;
+  if (auto config_value = config_string("game_data_root")) {
+    game_dir = *config_value;
+  }
   std::string game_data_cvar = REXCVAR_GET(game_data_root);
   if (!game_data_cvar.empty()) {
     game_dir = game_data_cvar;
@@ -85,15 +120,22 @@ bool ReXApp::SetupEnvironment() {
 
   // User data: cvar override, or platform user directory
   std::filesystem::path user_dir;
+  if (auto config_value = config_string("user_data_root")) {
+    user_dir = *config_value;
+  }
   std::string user_data_cvar = REXCVAR_GET(user_data_root);
   if (!user_data_cvar.empty()) {
     user_dir = user_data_cvar;
-  } else {
+  }
+  if (user_dir.empty()) {
     user_dir = rex::filesystem::GetUserFolder() / GetName();
   }
 
   // Update data: cvar override, or empty (opt-in)
   std::filesystem::path update_dir;
+  if (auto config_value = config_string("update_data_root")) {
+    update_dir = *config_value;
+  }
   std::string update_data_cvar = REXCVAR_GET(update_data_root);
   if (!update_data_cvar.empty()) {
     update_dir = update_data_cvar;
@@ -101,15 +143,18 @@ bool ReXApp::SetupEnvironment() {
 
   // Cache: cvar override, or user_dir/cache
   std::filesystem::path cache_dir;
+  if (auto config_value = config_string("cache_path")) {
+    cache_dir = *config_value;
+  }
   std::string cache_path_cvar = REXCVAR_GET(cache_path);
   if (!cache_path_cvar.empty()) {
     cache_dir = cache_path_cvar;
-  } else {
+  }
+  if (cache_dir.empty()) {
     cache_dir = user_dir / "cache";
   }
 
-  PathConfig path_config{game_dir, user_dir, update_dir, cache_dir,
-                         exe_dir / (std::string(GetName()) + ".toml")};
+  PathConfig path_config{game_dir, user_dir, update_dir, cache_dir, config_path};
   OnConfigurePaths(path_config);
   game_data_root_ = path_config.game_data_root;
   user_data_root_ = path_config.user_data_root;
@@ -117,10 +162,6 @@ bool ReXApp::SetupEnvironment() {
   cache_root_ = path_config.cache_root;
   config_path_ = path_config.config_path;
   resolved_defaults_ = std::move(path_config);
-
-  // Load config FIRST so log cvars have final values
-  if (std::filesystem::exists(config_path_))
-    rex::cvar::LoadConfig(config_path_);
 
   // Late-phase logging
   std::string log_file_cvar = REXCVAR_GET(log_file);
@@ -179,6 +220,18 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
   runtime_ = std::make_unique<rex::Runtime>(paths.game_data_root, paths.user_data_root,
                                             paths.update_data_root, paths.cache_root);
   runtime_->set_app_context(&app_context());
+  config_.config_path = paths.config_path;
+
+  // Recompiled guest code is linked into the host executable, while the kernel
+  // imports live in rexruntime. Keep the exe-side clock state in sync with
+  // Runtime::Setup so mftb and KeQueryPerformanceFrequency agree.
+  rex::chrono::Clock::set_guest_tick_frequency(50000000);
+  rex::chrono::Clock::set_guest_system_time_base(rex::chrono::Clock::QueryHostSystemTime());
+  rex::chrono::Clock::set_guest_time_scalar(1.0);
+  auto guest_tick_ratio = rex::chrono::Clock::guest_tick_ratio();
+  REXLOG_INFO("Host guest clock initialized: frequency={} ratio={}/{}",
+              rex::chrono::Clock::guest_tick_frequency(), guest_tick_ratio.first,
+              guest_tick_ratio.second);
 
   // Window and ImGui drawer already exist from SetupPresentation; publish them
   // to the runtime before Setup so hooks and native rendering see them.
@@ -326,6 +379,9 @@ bool ReXApp::SetupPresentation() {
           }
         });
         rex::ui::RegisterBind("bind_settings", "F4", "Toggle settings overlay", [this] {
+          if (!REXCVAR_GET(advanced_settings_overlay_enabled)) {
+            return;
+          }
           if (settings_overlay_) {
             settings_overlay_.reset();
           } else {
