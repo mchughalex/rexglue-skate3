@@ -38,12 +38,14 @@ class GTKWindow : public Window {
   GtkWidget* window() const { return window_; }
 
  protected:
+  uint32_t GetLatestDpiImpl() const override;
   bool OpenImpl() override;
   void RequestCloseImpl() override;
 
   void ApplyNewFullscreen() override;
   void ApplyNewTitle() override;
   void ApplyNewMainMenu(MenuItem* old_main_menu) override;
+  void ApplyNewCursorVisibility(CursorVisibility old_cursor_visibility) override;
   // Mouse capture seems to happen implicitly compared to Windows.
   void FocusImpl() override;
 
@@ -51,6 +53,7 @@ class GTKWindow : public Window {
   void RequestPaintImpl() override;
 
  private:
+  void UpdateDpi(WindowDestructionReceiver* destruction_receiver = nullptr);
   void HandleSizeUpdate(WindowDestructionReceiver& destruction_receiver);
   // For updating multiple factors that may influence the window size at once,
   // without handling the configure event multiple times (that may not only
@@ -64,6 +67,9 @@ class GTKWindow : public Window {
   bool HandleKeyboard(GdkEventKey* event, WindowDestructionReceiver& destruction_receiver);
   gboolean WindowEventHandler(GdkEvent* event);
   static gboolean WindowEventHandlerThunk(GtkWidget* widget, GdkEvent* event, gpointer user_data);
+  void ApplyCursor();
+  void SetCursorAutoHideTimer();
+  static gboolean AutoHideCursorTimerCallback(gpointer user_data);
 
   // Handling events related specifically to the drawing (client) area.
   gboolean DrawingAreaEventHandler(GdkEvent* event);
@@ -75,6 +81,10 @@ class GTKWindow : public Window {
   GtkWidget* window_ = nullptr;
   GtkWidget* box_ = nullptr;
   GtkWidget* drawing_area_ = nullptr;
+  GdkCursor* blank_cursor_ = nullptr;
+  guint cursor_auto_hide_timer_ = 0;
+  bool cursor_currently_auto_hidden_ = false;
+  uint32_t dpi_ = 96;
 
   uint32_t batched_size_update_depth_ = 0;
   bool batched_size_update_contained_configure_ = false;

@@ -23,7 +23,7 @@ ImGuiDialog::ImGuiDialog(ImGuiDrawer* imgui_drawer) : imgui_drawer_(imgui_drawer
 }
 
 ImGuiDialog::~ImGuiDialog() {
-  imgui_drawer_->RemoveDialog(this);
+  SetDrawActive(false);
   for (auto fence : waiting_fences_) {
     fence->Signal();
   }
@@ -39,6 +39,18 @@ void ImGuiDialog::Close() {
 
 ImGuiIO& ImGuiDialog::GetIO() {
   return imgui_drawer()->GetIO();
+}
+
+void ImGuiDialog::SetDrawActive(bool active) {
+  if (is_draw_active_ == active) {
+    return;
+  }
+  is_draw_active_ = active;
+  if (active) {
+    imgui_drawer_->AddDialog(this);
+  } else {
+    imgui_drawer_->RemoveDialog(this);
+  }
 }
 
 void ImGuiDialog::Draw() {

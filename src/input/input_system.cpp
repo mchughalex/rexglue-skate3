@@ -22,8 +22,20 @@
 #include <rex/input/sdl/sdl_input_driver.h>
 #include <rex/input/xinput/xinput_input_driver.h>
 #include <rex/logging.h>
+#include <rex/platform.h>
 
-REXCVAR_DEFINE_STRING(input_backend, "xinput", "Input", "Input backend: sdl, xinput")
+namespace {
+
+constexpr const char* kDefaultInputBackend =
+#if REX_PLATFORM_WIN32
+    "xinput";
+#else
+    "sdl";
+#endif
+
+}  // namespace
+
+REXCVAR_DEFINE_STRING(input_backend, kDefaultInputBackend, "Input", "Input backend: sdl, xinput")
     .allowed({"sdl", "xinput"});
 
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");

@@ -106,6 +106,12 @@ bool MnkInputDriver::IsEnabled() const {
   return REXCVAR_GET(mnk_mode);
 }
 
+void MnkInputDriver::ClearStateLocked() {
+  std::memset(key_down_, 0, sizeof(key_down_));
+  mouse_dx_ = 0;
+  mouse_dy_ = 0;
+}
+
 static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_val) {
   VirtualKey vk = rex::ui::ParseVirtualKey(cvar_val);
   if (vk == VirtualKey::kNone)
@@ -138,13 +144,20 @@ X_RESULT MnkInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 }
 
 X_RESULT MnkInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
-  if (!IsEnabled() || user_index != UserIndex()) {
+  if (!IsEnabled()) {
+    std::lock_guard lock(state_mutex_);
+    ClearStateLocked();
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  if (user_index != UserIndex()) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   UpdateMouseCapture();
 
   if (!is_active() || !has_focus_) {
+    std::lock_guard lock(state_mutex_);
+    ClearStateLocked();
     if (out_state) {
       std::memset(out_state, 0, sizeof(*out_state));
       out_state->packet_number = packet_number_;
@@ -235,10 +248,25 @@ X_RESULT MnkInputDriver::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibrat
 
 X_RESULT MnkInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
                                       X_INPUT_KEYSTROKE* out_keystroke) {
-  if (!IsEnabled() || user_index != UserIndex()) {
+  if (!IsEnabled()) {
+    std::lock_guard lock(state_mutex_);
+    ClearStateLocked();
+    while (!keystroke_queue_.empty()) {
+      keystroke_queue_.pop();
+    }
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  if (user_index != UserIndex()) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   std::lock_guard lock(state_mutex_);
+  if (!is_active() || !has_focus_) {
+    ClearStateLocked();
+    while (!keystroke_queue_.empty()) {
+      keystroke_queue_.pop();
+    }
+    return X_ERROR_EMPTY;
+  }
   if (keystroke_queue_.empty()) {
     return X_ERROR_EMPTY;
   }
@@ -308,8 +336,9 @@ void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
 }
 
 void MnkInputDriver::OnKeyDown(rex::ui::KeyEvent& e) {
-  if (!IsEnabled() || !has_focus_)
+  if (!IsEnabled() || !has_focus_ || !is_active()) {
     return;
+  }
   std::lock_guard lock(state_mutex_);
   uint16_t vk = static_cast<uint16_t>(e.virtual_key());
   SetKeyState(vk, true);
@@ -324,7 +353,7 @@ void MnkInputDriver::OnKeyUp(rex::ui::KeyEvent& e) {
 }
 
 void MnkInputDriver::OnMouseDown(rex::ui::MouseEvent& e) {
-  if (!IsEnabled() || !has_focus_)
+  if (!IsEnabled() || !has_focus_ || !is_active())
     return;
   std::lock_guard lock(state_mutex_);
   switch (e.button()) {
@@ -362,7 +391,7 @@ void MnkInputDriver::OnMouseUp(rex::ui::MouseEvent& e) {
 }
 
 void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
-  if (!IsEnabled() || !has_focus_)
+  if (!IsEnabled() || !has_focus_ || !is_active())
     return;
   std::lock_guard lock(state_mutex_);
   int32_t x = e.x();
@@ -376,9 +405,7 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
 void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
   std::lock_guard lock(state_mutex_);
   has_focus_ = false;
-  std::memset(key_down_, 0, sizeof(key_down_));
-  mouse_dx_ = 0;
-  mouse_dy_ = 0;
+  ClearStateLocked();
   if (mouse_captured_ && attached_window_) {
     mouse_captured_ = false;
     attached_window_->SetCursorVisibility(rex::ui::Window::CursorVisibility::kVisible);

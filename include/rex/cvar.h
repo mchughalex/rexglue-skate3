@@ -112,6 +112,8 @@ bool IsFinalized();
 void SaveConfig(const std::filesystem::path& config_path);
 void SaveConfigValues(const std::filesystem::path& config_path,
                       std::initializer_list<std::string_view> names);
+void SaveConfigValues(const std::filesystem::path& config_path,
+                      const std::vector<std::string_view>& names);
 
 //=============================================================================
 // Flag Registry

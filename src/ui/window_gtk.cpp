@@ -27,7 +27,49 @@
 #include <gdk/gdkx.h>
 #include <xcb/xcb.h>
 
+REXCVAR_DEFINE_DOUBLE(gtk_ui_scale, 1.25, "UI/GTK",
+                      "GTK effective UI scale multiplier")
+    .range(0.75, 2.0)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 namespace {
+
+constexpr uint32_t kDefaultDpi = 96;
+
+uint32_t CalculateMonitorDpi(GdkMonitor* monitor) {
+  if (!monitor) {
+    return kDefaultDpi;
+  }
+  // GDK monitor geometry plus physical millimeter size gives EDID physical
+  // density, not the desktop UI scale. Match Windows DPI behavior by exposing
+  // effective UI DPI instead.
+  const int scale_factor = std::max(1, gdk_monitor_get_scale_factor(monitor));
+  const auto dpi =
+      uint32_t(double(kDefaultDpi * uint32_t(scale_factor)) * REXCVAR_GET(gtk_ui_scale) + 0.5);
+  return std::clamp(dpi, uint32_t(48), uint32_t(384));
+}
+
+uint32_t QueryWidgetDpi(GtkWidget* widget) {
+  GdkDisplay* display = widget ? gtk_widget_get_display(widget) : gdk_display_get_default();
+  if (!display) {
+    return kDefaultDpi;
+  }
+
+  GdkMonitor* monitor = nullptr;
+  if (widget) {
+    GdkWindow* gdk_window = gtk_widget_get_window(widget);
+    if (gdk_window) {
+      monitor = gdk_display_get_monitor_at_window(display, gdk_window);
+    }
+  }
+  if (!monitor) {
+    monitor = gdk_display_get_primary_monitor(display);
+  }
+  if (!monitor && gdk_display_get_n_monitors(display) > 0) {
+    monitor = gdk_display_get_monitor(display, 0);
+  }
+  return CalculateMonitorDpi(monitor);
+}
 
 uint32_t ResolveWindowWidth(uint32_t requested_width) {
   if (REXCVAR_GET(window_width) > 0) {
@@ -313,10 +355,20 @@ std::unique_ptr<Window> Window::Create(WindowedAppContext& app_context,
 
 GTKWindow::GTKWindow(WindowedAppContext& app_context, const std::string_view title,
                      uint32_t desired_logical_width, uint32_t desired_logical_height)
-    : Window(app_context, title, desired_logical_width, desired_logical_height) {}
+    : Window(app_context, title, desired_logical_width, desired_logical_height) {
+  dpi_ = QueryWidgetDpi(nullptr);
+}
 
 GTKWindow::~GTKWindow() {
   EnterDestructor();
+  if (cursor_auto_hide_timer_) {
+    g_source_remove(cursor_auto_hide_timer_);
+    cursor_auto_hide_timer_ = 0;
+  }
+  if (blank_cursor_) {
+    g_object_unref(blank_cursor_);
+    blank_cursor_ = nullptr;
+  }
   if (window_) {
     // Set window_ to null to ignore events from now on since this ui::GTKWindow
     // is entering an indeterminate state.
@@ -329,8 +381,26 @@ GTKWindow::~GTKWindow() {
   }
 }
 
+uint32_t GTKWindow::GetLatestDpiImpl() const {
+  return dpi_;
+}
+
+void GTKWindow::UpdateDpi(WindowDestructionReceiver* destruction_receiver) {
+  const uint32_t new_dpi = QueryWidgetDpi(drawing_area_ ? drawing_area_ : window_);
+  if (!new_dpi || new_dpi == dpi_) {
+    return;
+  }
+
+  dpi_ = new_dpi;
+  if (destruction_receiver) {
+    UISetupEvent e(this);
+    OnDpiChanged(e, *destruction_receiver);
+  }
+}
+
 bool GTKWindow::OpenImpl() {
   window_ = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+  blank_cursor_ = gdk_cursor_new_for_display(gtk_widget_get_display(window_), GDK_BLANK_CURSOR);
 
   gtk_window_set_title(GTK_WINDOW(window_), GetTitle().c_str());
 
@@ -344,6 +414,10 @@ bool GTKWindow::OpenImpl() {
   GtkWidget* main_menu_widget = main_menu ? main_menu->handle() : nullptr;
   if (main_menu_widget) {
     gtk_box_pack_start(GTK_BOX(box_), main_menu_widget, FALSE, FALSE, 0);
+  }
+  const bool initial_fullscreen = IsFullscreen();
+  if (initial_fullscreen && main_menu_widget) {
+    gtk_container_remove(GTK_CONTAINER(box_), main_menu_widget);
   }
 
   // Create the drawing area for creating the surface for, which will be the
@@ -371,8 +445,22 @@ bool GTKWindow::OpenImpl() {
   g_signal_connect(G_OBJECT(drawing_area_), "draw", G_CALLBACK(DrawHandler),
                    reinterpret_cast<gpointer>(this));
 
+  if (initial_fullscreen) {
+    gtk_window_fullscreen(GTK_WINDOW(window_));
+    g_idle_add(
+        [](gpointer user_data) -> gboolean {
+          auto* gtk_window = reinterpret_cast<GTKWindow*>(user_data);
+          if (gtk_window->window_ && gtk_window->IsFullscreen()) {
+            gtk_window_fullscreen(GTK_WINDOW(gtk_window->window_));
+          }
+          return G_SOURCE_REMOVE;
+        },
+        this);
+  }
+
   // Finally show all the widgets in the window, including the main menu.
   gtk_widget_show_all(window_);
+  UpdateDpi();
 
   // Remove the size request after finishing the initial layout because it makes
   // it impossible to make the window smaller.
@@ -393,12 +481,10 @@ bool GTKWindow::OpenImpl() {
 
   // After setting up the initial layout for non-fullscreen, enter fullscreen if
   // requested.
-  if (IsFullscreen()) {
-    if (main_menu_widget) {
-      gtk_container_remove(GTK_CONTAINER(box_), main_menu_widget);
-    }
+  if (initial_fullscreen) {
     gtk_window_fullscreen(GTK_WINDOW(window_));
   }
+  ApplyNewCursorVisibility(CursorVisibility::kVisible);
 
   // Make sure the initial state after opening is reported to the common Window
   // class no matter how GTK sends the events.
@@ -556,6 +642,20 @@ void GTKWindow::ApplyNewMainMenu(MenuItem* old_main_menu) {
   }
 }
 
+void GTKWindow::ApplyNewCursorVisibility(CursorVisibility old_cursor_visibility) {
+  CursorVisibility new_cursor_visibility = GetCursorVisibility();
+  if (cursor_auto_hide_timer_) {
+    g_source_remove(cursor_auto_hide_timer_);
+    cursor_auto_hide_timer_ = 0;
+  }
+  cursor_currently_auto_hidden_ = new_cursor_visibility != CursorVisibility::kVisible;
+  ApplyCursor();
+  if (new_cursor_visibility == CursorVisibility::kAutoHidden &&
+      old_cursor_visibility == CursorVisibility::kAutoHidden) {
+    SetCursorAutoHideTimer();
+  }
+}
+
 void GTKWindow::FocusImpl() {
   gtk_window_activate_focus(GTK_WINDOW(window_));
 }
@@ -594,10 +694,17 @@ void GTKWindow::HandleSizeUpdate(WindowDestructionReceiver& destruction_receiver
     return;
   }
 
-  // TODO(Triang3l): Report the desired client area size.
+  UpdateDpi(&destruction_receiver);
+  if (destruction_receiver.IsWindowDestroyedOrClosed()) {
+    return;
+  }
 
   GtkAllocation drawing_area_allocation;
   gtk_widget_get_allocation(drawing_area_, &drawing_area_allocation);
+  if (!IsFullscreen()) {
+    OnDesiredLogicalSizeUpdate(SizeToLogical(uint32_t(drawing_area_allocation.width)),
+                               SizeToLogical(uint32_t(drawing_area_allocation.height)));
+  }
   OnActualSizeUpdate(uint32_t(drawing_area_allocation.width),
                      uint32_t(drawing_area_allocation.height), destruction_receiver);
   if (destruction_receiver.IsWindowDestroyedOrClosed()) {
@@ -757,6 +864,14 @@ gboolean GTKWindow::WindowEventHandler(GdkEvent* event) {
       // at some point in closing anyway.
       GtkWidget* window = window_;
       window_ = nullptr;
+      if (cursor_auto_hide_timer_) {
+        g_source_remove(cursor_auto_hide_timer_);
+        cursor_auto_hide_timer_ = 0;
+      }
+      if (blank_cursor_) {
+        g_object_unref(blank_cursor_);
+        blank_cursor_ = nullptr;
+      }
       // Destroying the top-level window also destroys its children.
       drawing_area_ = nullptr;
       box_ = nullptr;
@@ -773,6 +888,7 @@ gboolean GTKWindow::WindowEventHandler(GdkEvent* event) {
       if (destruction_receiver.IsWindowDestroyedOrClosed()) {
         break;
       }
+      ApplyCursor();
     } break;
 
     case GDK_KEY_PRESS:
@@ -805,12 +921,59 @@ gboolean GTKWindow::WindowEventHandlerThunk(GtkWidget* widget, GdkEvent* event,
   return window->WindowEventHandler(event);
 }
 
+void GTKWindow::ApplyCursor() {
+  if (!drawing_area_) {
+    return;
+  }
+  GdkWindow* drawing_area_window = gtk_widget_get_window(drawing_area_);
+  if (!drawing_area_window) {
+    return;
+  }
+  GdkCursor* cursor = nullptr;
+  switch (GetCursorVisibility()) {
+    case CursorVisibility::kVisible:
+      cursor = nullptr;
+      break;
+    case CursorVisibility::kAutoHidden:
+      cursor = cursor_currently_auto_hidden_ ? blank_cursor_ : nullptr;
+      break;
+    case CursorVisibility::kHidden:
+      cursor = blank_cursor_;
+      break;
+  }
+  gdk_window_set_cursor(drawing_area_window, cursor);
+}
+
+void GTKWindow::SetCursorAutoHideTimer() {
+  if (cursor_auto_hide_timer_) {
+    g_source_remove(cursor_auto_hide_timer_);
+    cursor_auto_hide_timer_ = 0;
+  }
+  cursor_auto_hide_timer_ =
+      g_timeout_add(kDefaultCursorAutoHideMilliseconds, AutoHideCursorTimerCallback, this);
+}
+
+gboolean GTKWindow::AutoHideCursorTimerCallback(gpointer user_data) {
+  auto* gtk_window = reinterpret_cast<GTKWindow*>(user_data);
+  gtk_window->cursor_auto_hide_timer_ = 0;
+  if (gtk_window->GetCursorVisibility() == CursorVisibility::kAutoHidden) {
+    gtk_window->cursor_currently_auto_hidden_ = true;
+    gtk_window->ApplyCursor();
+  }
+  return G_SOURCE_REMOVE;
+}
+
 gboolean GTKWindow::DrawingAreaEventHandler(GdkEvent* event) {
   switch (event->type) {
     case GDK_MOTION_NOTIFY:
     case GDK_BUTTON_PRESS:
     case GDK_BUTTON_RELEASE:
     case GDK_SCROLL: {
+      if (GetCursorVisibility() == CursorVisibility::kAutoHidden) {
+        cursor_currently_auto_hidden_ = false;
+        ApplyCursor();
+        SetCursorAutoHideTimer();
+      }
       WindowDestructionReceiver destruction_receiver(this);
       HandleMouse(event, destruction_receiver);
       if (destruction_receiver.IsWindowDestroyedOrClosed()) {

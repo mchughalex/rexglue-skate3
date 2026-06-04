@@ -606,25 +606,16 @@ bool IsFinalized() {
 void SaveConfig(const std::filesystem::path& config_path) {
   try {
     toml::table config;
-    if (std::filesystem::exists(config_path)) {
-      config = toml::parse_file(config_path.string());
-    }
 
     {
       std::lock_guard lock(GetRegistryMutex());
-      bool modified = false;
       for (const auto& entry : GetRegistryStorage()) {
         if (entry.getter() == entry.default_value) {
           continue;
         }
 
         const std::string value = entry.getter();
-        modified |= WriteConfigValue(config, entry, value);
-      }
-
-      if (!modified) {
-        REXLOG_DEBUG("SaveConfig: no modified flags to save");
-        return;
+        WriteConfigValue(config, entry, value);
       }
     }
 
@@ -638,6 +629,11 @@ void SaveConfig(const std::filesystem::path& config_path) {
 
 void SaveConfigValues(const std::filesystem::path& config_path,
                       std::initializer_list<std::string_view> names) {
+  SaveConfigValues(config_path, std::vector<std::string_view>(names));
+}
+
+void SaveConfigValues(const std::filesystem::path& config_path,
+                      const std::vector<std::string_view>& names) {
   try {
     toml::table config;
     if (std::filesystem::exists(config_path)) {

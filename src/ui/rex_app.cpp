@@ -18,6 +18,7 @@
 #include <rex/filesystem.h>
 #include <rex/logging/sink.h>
 #include <rex/logging.h>
+#include <rex/platform.h>
 #include <rex/ui/overlay/console_overlay.h>
 #include <rex/ui/overlay/debug_overlay.h>
 #include <rex/ui/overlay/settings_overlay.h>
@@ -50,7 +51,18 @@
 
 namespace rex {
 
-REXCVAR_DEFINE_BOOL(advanced_settings_overlay_enabled, false, "UI/Advanced",
+namespace {
+
+constexpr bool kBlockShaderStorageStartup =
+#if REX_PLATFORM_WIN32
+    true;
+#else
+    false;
+#endif
+
+}  // namespace
+
+REXCVAR_DEFINE_BOOL(advanced_settings_overlay_enabled, true, "UI/Advanced",
                     "Enable the developer cvar browser on F4");
 
 // --- ReXApp ---
@@ -262,7 +274,8 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
       input_sys->SetActiveCallback([this]() {
         if (!debug_overlay_ && !console_overlay_ && !settings_overlay_)
           return true;
-        return !imgui_drawer_->GetIO().WantCaptureMouse;
+        const auto& io = imgui_drawer_->GetIO();
+        return !io.WantCaptureMouse && !io.WantCaptureKeyboard;
       });
     }
   }
@@ -416,7 +429,8 @@ void ReXApp::LaunchModule() {
       uint32_t title_id = runtime_->kernel_state()->title_id();
       if (title_id != 0) {
         REXLOG_INFO("Initializing shader storage for title {:08X}...", title_id);
-        graphics_system->InitializeShaderStorage(runtime_->cache_root(), title_id, true);
+        graphics_system->InitializeShaderStorage(runtime_->cache_root(), title_id,
+                                                kBlockShaderStorageStartup);
       }
     }
 

@@ -23,17 +23,43 @@ constexpr std::array<double, 6> kFrameCapRates = {60.0, 90.0, 120.0, 144.0, 165.
 constexpr std::array<const char*, 7> kFrameCapLabels = {"Unlimited", "60 FPS", "90 FPS",
                                                         "120 FPS", "144 FPS", "165 FPS",
                                                         "240 FPS"};
-constexpr std::array<std::string_view, 10> kSimpleSettingsCvars = {
+constexpr std::array<std::string_view, 7> kCoreSimpleSettingsCvars = {
     "resolution_scale",
     "draw_resolution_scale_x",
     "draw_resolution_scale_y",
-    "d3d12_present_frame_limiter",
-    "d3d12_present_frame_limiter_fps",
     "fullscreen",
     "vsync",
-    "d3d12_allow_variable_refresh_rate_and_tearing",
     "mnk_mode",
     "mnk_capture_mouse"};
+
+bool HasCvar(std::string_view name) {
+  return rex::cvar::GetFlagInfo(name) != nullptr;
+}
+
+std::vector<std::string_view> GetSimpleSettingsCvars() {
+  std::vector<std::string_view> cvars;
+  cvars.reserve(14);
+  cvars.insert(cvars.end(), kCoreSimpleSettingsCvars.begin(), kCoreSimpleSettingsCvars.end());
+  if (HasCvar("d3d12_present_frame_limiter")) {
+    cvars.push_back("d3d12_present_frame_limiter");
+  }
+  if (HasCvar("d3d12_present_frame_limiter_fps")) {
+    cvars.push_back("d3d12_present_frame_limiter_fps");
+  }
+  if (HasCvar("d3d12_allow_variable_refresh_rate_and_tearing")) {
+    cvars.push_back("d3d12_allow_variable_refresh_rate_and_tearing");
+  }
+  if (HasCvar("vulkan_allow_present_mode_immediate")) {
+    cvars.push_back("vulkan_allow_present_mode_immediate");
+  }
+  if (HasCvar("vulkan_allow_present_mode_mailbox")) {
+    cvars.push_back("vulkan_allow_present_mode_mailbox");
+  }
+  if (HasCvar("vulkan_allow_present_mode_fifo_relaxed")) {
+    cvars.push_back("vulkan_allow_present_mode_fifo_relaxed");
+  }
+  return cvars;
+}
 
 int ResolutionIndexFromCvar() {
   int32_t current = rex::cvar::Query<int32_t>("resolution_scale");
@@ -50,7 +76,14 @@ int ResolutionIndexFromCvar() {
   return best;
 }
 
+bool HasFrameCapCvars() {
+  return HasCvar("d3d12_present_frame_limiter") && HasCvar("d3d12_present_frame_limiter_fps");
+}
+
 int FrameCapIndexFromCvar() {
+  if (!HasFrameCapCvars()) {
+    return 0;
+  }
   if (!rex::cvar::Query<bool>("d3d12_present_frame_limiter")) {
     return 0;
   }
@@ -75,6 +108,31 @@ void CopyToBuffer(char* buffer, size_t buffer_size, const std::string& value) {
 
 void SetBoolCvar(std::string_view name, bool value) {
   rex::cvar::SetFlagByName(name, value ? "true" : "false");
+}
+
+bool TearingFromCvar() {
+  if (HasCvar("d3d12_allow_variable_refresh_rate_and_tearing")) {
+    return rex::cvar::Query<bool>("d3d12_allow_variable_refresh_rate_and_tearing");
+  }
+  if (HasCvar("vulkan_allow_present_mode_immediate")) {
+    return rex::cvar::Query<bool>("vulkan_allow_present_mode_immediate");
+  }
+  return false;
+}
+
+void SetTearingCvars(bool value) {
+  if (HasCvar("d3d12_allow_variable_refresh_rate_and_tearing")) {
+    SetBoolCvar("d3d12_allow_variable_refresh_rate_and_tearing", value);
+  }
+  if (HasCvar("vulkan_allow_present_mode_immediate")) {
+    SetBoolCvar("vulkan_allow_present_mode_immediate", value);
+  }
+  if (HasCvar("vulkan_allow_present_mode_mailbox")) {
+    SetBoolCvar("vulkan_allow_present_mode_mailbox", value);
+  }
+  if (HasCvar("vulkan_allow_present_mode_fifo_relaxed")) {
+    SetBoolCvar("vulkan_allow_present_mode_fifo_relaxed", value);
+  }
 }
 
 void SectionTitle(const char* label) {
@@ -103,17 +161,7 @@ bool PrimaryButton(const char* label) {
 }  // namespace
 
 void SaveSimpleSettingsConfig(const std::filesystem::path& config_path) {
-  rex::cvar::SaveConfigValues(config_path,
-                              {"resolution_scale",
-                               "draw_resolution_scale_x",
-                               "draw_resolution_scale_y",
-                               "d3d12_present_frame_limiter",
-                               "d3d12_present_frame_limiter_fps",
-                               "fullscreen",
-                               "vsync",
-                               "d3d12_allow_variable_refresh_rate_and_tearing",
-                               "mnk_mode",
-                               "mnk_capture_mouse"});
+  rex::cvar::SaveConfigValues(config_path, GetSimpleSettingsCvars());
 }
 
 void EnsureSimpleSettingsConfig(const std::filesystem::path& config_path) {
@@ -121,7 +169,7 @@ void EnsureSimpleSettingsConfig(const std::filesystem::path& config_path) {
   if (!should_save) {
     try {
       auto config = toml::parse_file(config_path.string());
-      for (std::string_view name : kSimpleSettingsCvars) {
+      for (std::string_view name : GetSimpleSettingsCvars()) {
         if (!config.contains(name)) {
           should_save = true;
           break;
@@ -152,12 +200,14 @@ SimpleSettingsDialog::SimpleSettingsDialog(ImGuiDrawer* drawer, std::filesystem:
       restart_game_(std::move(restart_game)) {
   ReloadProfiles();
   LoadSettingsFromCvars();
+  SetDrawActive(false);
 }
 
 SimpleSettingsDialog::~SimpleSettingsDialog() = default;
 
 void SimpleSettingsDialog::Show() {
   visible_ = true;
+  SetDrawActive(true);
   ReloadProfiles();
   LoadSettingsFromCvars();
 }
@@ -167,7 +217,7 @@ void SimpleSettingsDialog::LoadSettingsFromCvars() {
   frame_cap_index_ = FrameCapIndexFromCvar();
   fullscreen_ = rex::cvar::Query<bool>("fullscreen");
   vsync_ = rex::cvar::Query<bool>("vsync");
-  tearing_ = rex::cvar::Query<bool>("d3d12_allow_variable_refresh_rate_and_tearing");
+  tearing_ = TearingFromCvar();
   mnk_mode_ = rex::cvar::Query<bool>("mnk_mode");
   mnk_capture_mouse_ = rex::cvar::Query<bool>("mnk_capture_mouse");
 }
@@ -177,7 +227,7 @@ bool SimpleSettingsDialog::HasSettingsChanges() const {
          frame_cap_index_ != FrameCapIndexFromCvar() ||
          fullscreen_ != rex::cvar::Query<bool>("fullscreen") ||
          vsync_ != rex::cvar::Query<bool>("vsync") ||
-         tearing_ != rex::cvar::Query<bool>("d3d12_allow_variable_refresh_rate_and_tearing") ||
+         tearing_ != TearingFromCvar() ||
          mnk_mode_ != rex::cvar::Query<bool>("mnk_mode") ||
          mnk_capture_mouse_ != rex::cvar::Query<bool>("mnk_capture_mouse");
 }
@@ -195,6 +245,7 @@ void SimpleSettingsDialog::Hide() {
     return;
   }
   visible_ = false;
+  SetDrawActive(false);
   if (close_settings_) {
     close_settings_();
   }
@@ -222,14 +273,16 @@ void SimpleSettingsDialog::SaveVideo() {
   rex::cvar::SetFlagByName("resolution_scale", scale);
   rex::cvar::SetFlagByName("draw_resolution_scale_x", scale);
   rex::cvar::SetFlagByName("draw_resolution_scale_y", scale);
-  SetBoolCvar("d3d12_present_frame_limiter", frame_cap_index_ != 0);
-  if (frame_cap_index_ != 0) {
+  if (HasFrameCapCvars()) {
+    SetBoolCvar("d3d12_present_frame_limiter", frame_cap_index_ != 0);
+  }
+  if (HasFrameCapCvars() && frame_cap_index_ != 0) {
     rex::cvar::SetFlagByName("d3d12_present_frame_limiter_fps",
                              std::to_string(kFrameCapRates[frame_cap_index_ - 1]));
   }
   SetBoolCvar("fullscreen", fullscreen_);
   SetBoolCvar("vsync", vsync_);
-  SetBoolCvar("d3d12_allow_variable_refresh_rate_and_tearing", tearing_);
+  SetTearingCvars(tearing_);
   SetBoolCvar("mnk_mode", mnk_mode_);
   SetBoolCvar("mnk_capture_mouse", mnk_capture_mouse_);
   SaveSimpleSettingsConfig(config_path_);
@@ -341,10 +394,12 @@ void SimpleSettingsDialog::OnDraw(ImGuiIO& io) {
                  static_cast<int>(kResolutionLabels.size()));
     EndFieldRow();
 
-    BeginFieldRow("Framerate Cap");
-    ImGui::Combo("##frame_cap", &frame_cap_index_, kFrameCapLabels.data(),
-                 static_cast<int>(kFrameCapLabels.size()));
-    EndFieldRow();
+    if (HasFrameCapCvars()) {
+      BeginFieldRow("Framerate Cap");
+      ImGui::Combo("##frame_cap", &frame_cap_index_, kFrameCapLabels.data(),
+                   static_cast<int>(kFrameCapLabels.size()));
+      EndFieldRow();
+    }
 
     ImGui::Separator();
     ImGui::Spacing();

@@ -44,6 +44,8 @@ class ImGuiDialog {
 
   ImGuiDrawer* imgui_drawer() const { return imgui_drawer_; }
   ImGuiIO& GetIO();
+  void SetDrawActive(bool active);
+  bool IsDrawActive() const { return is_draw_active_; }
 
   // Closes the dialog and returns to any waiters.
   void Close();
@@ -54,6 +56,7 @@ class ImGuiDialog {
 
  private:
   ImGuiDrawer* imgui_drawer_ = nullptr;
+  bool is_draw_active_ = true;
   bool has_close_pending_ = false;
   std::vector<rex::thread::Fence*> waiting_fences_;
 };
