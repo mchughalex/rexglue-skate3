@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -138,6 +139,15 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
 
   /// Called after logging is initialized. Add log sinks here.
   virtual void OnPostInitLogging() {}
+
+  /// Product-specific title suffix shown in the host window title.
+  virtual std::string_view GetBuildTitle() const;
+
+  /// Product-specific build stamp shown in debug overlays.
+  virtual std::string_view GetBuildStamp() const;
+
+  /// Product-specific host window title.
+  virtual std::string GetWindowTitle() const;
 
   /// Called after Runtime::LoadXexImage() succeeds. The XEX is loaded and
   /// mapped into guest memory but the module has not launched.

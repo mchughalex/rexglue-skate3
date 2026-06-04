@@ -73,6 +73,18 @@ ReXApp::ReXApp(ui::WindowedAppContext& ctx, std::string_view name, PPCImageInfo 
                std::string_view usage)
     : WindowedApp(ctx, name, usage), ppc_info_(ppc_info) {}
 
+std::string_view ReXApp::GetBuildTitle() const {
+  return REXGLUE_BUILD_TITLE;
+}
+
+std::string_view ReXApp::GetBuildStamp() const {
+  return REXGLUE_BUILD_STAMP;
+}
+
+std::string ReXApp::GetWindowTitle() const {
+  return std::string(GetName()) + " " + std::string(GetBuildTitle());
+}
+
 bool ReXApp::OnInitialize() {
   if (!SetupEnvironment())
     return false;
@@ -353,9 +365,7 @@ bool ReXApp::SetupPresentation() {
     return false;
   }
 
-  // Set window title with SDK build stamp
-  std::string title = std::string(GetName()) + " " + REXGLUE_BUILD_TITLE;
-  window_->SetTitle(title);
+  window_->SetTitle(GetWindowTitle());
 
   window_->AddListener(this);
   window_->AddInputListener(this, 0);
@@ -380,8 +390,8 @@ bool ReXApp::SetupPresentation() {
           if (debug_overlay_) {
             debug_overlay_.reset();
           } else {
-            debug_overlay_ = std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(),
-                                                                      frame_stats_provider_);
+            debug_overlay_ = std::make_unique<ui::DebugOverlayDialog>(
+                imgui_drawer_.get(), frame_stats_provider_, GetBuildStamp());
           }
         });
         rex::ui::RegisterBind("bind_console", "Backtick", "Toggle console overlay", [this] {

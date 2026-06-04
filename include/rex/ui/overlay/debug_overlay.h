@@ -14,6 +14,8 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <string>
+#include <string_view>
 
 namespace rex::ui {
 
@@ -27,7 +29,8 @@ class DebugOverlayDialog : public ImGuiDialog {
  public:
   using FrameStatsProvider = std::function<FrameStats()>;
 
-  explicit DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider = {});
+  explicit DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider = {},
+                              std::string_view build_stamp = {});
   ~DebugOverlayDialog();
 
   void SetStatsProvider(FrameStatsProvider provider) { stats_provider_ = std::move(provider); }
@@ -37,6 +40,7 @@ class DebugOverlayDialog : public ImGuiDialog {
 
  private:
   FrameStatsProvider stats_provider_;
+  std::string build_stamp_;
 #ifdef REXGLUE_ENABLE_PERF_COUNTERS
   static constexpr size_t kFrameHistorySize = 120;
   std::array<float, kFrameHistorySize> frame_time_history_{};

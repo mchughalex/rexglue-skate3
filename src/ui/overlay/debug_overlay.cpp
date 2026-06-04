@@ -39,8 +39,11 @@ float CounterMs(rex::perf::CounterId id) {
 }  // namespace
 #endif
 
-DebugOverlayDialog::DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider)
-    : ImGuiDialog(imgui_drawer), stats_provider_(std::move(stats_provider)) {}
+DebugOverlayDialog::DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider,
+                                       std::string_view build_stamp)
+    : ImGuiDialog(imgui_drawer),
+      stats_provider_(std::move(stats_provider)),
+      build_stamp_(build_stamp.empty() ? REXGLUE_BUILD_STAMP : std::string(build_stamp)) {}
 
 DebugOverlayDialog::~DebugOverlayDialog() {}
 
@@ -200,7 +203,8 @@ void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
   ImGui::PopFont();
 
   // Build stamp watermark -- centered near bottom of screen
-  auto text_size = ImGui::CalcTextSize(REXGLUE_BUILD_STAMP);
+  const char* build_stamp = build_stamp_.c_str();
+  auto text_size = ImGui::CalcTextSize(build_stamp);
   float padding = ImGui::GetStyle().WindowPadding.x * 2.0f;
   float bottom_offset = io.DisplaySize.y * 0.03f;
   ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - text_size.x - padding) * 0.5f,
@@ -208,10 +212,10 @@ void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
   ImGui::SetNextWindowSize(ImVec2(0, 0));
   ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.5f));
   if (ImGui::Begin("##watermark", nullptr,
-                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+                       ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
                        ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize)) {
-    ImGui::TextUnformatted(REXGLUE_BUILD_STAMP);
+    ImGui::TextUnformatted(build_stamp);
   }
   ImGui::End();
   ImGui::PopStyleColor();

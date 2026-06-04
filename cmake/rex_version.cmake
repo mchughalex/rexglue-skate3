@@ -9,7 +9,7 @@
 # Emits a CMake-style version string: MAJOR.MINOR[.PATCH[.TWEAK]][-id].
 # See https://cmake.org/cmake/help/latest/variable/CMAKE_VERSION.html
 #
-# Tagged commit (vX.Y[.Z[.W]]): emits the tag verbatim (without the v).
+# Tagged commit (vX.Y[.Z[.W]][-id]): emits the tag verbatim (without the v).
 # Untagged commit: emits MAJOR.<floor-minor>.<derived-patch>.<commit-count>-<id>
 #   where id is "dev.gSHA" on any branch and "rc.gSHA" on a release/* branch.
 #==========================================================
@@ -18,7 +18,7 @@ function(rex_compute_version out_var)
     cmake_parse_arguments(ARG "" "${one_value}" "" ${ARGN})
 
     if(NOT "${ARG_GIT_DESCRIBE_EXACT}" STREQUAL "")
-        if(ARG_GIT_DESCRIBE_EXACT MATCHES "^v([0-9]+\\.[0-9]+(\\.[0-9]+)?(\\.[0-9]+)?)$")
+        if(ARG_GIT_DESCRIBE_EXACT MATCHES "^v([0-9]+\\.[0-9]+(\\.[0-9]+)?(\\.[0-9]+)?(-[0-9A-Za-z][0-9A-Za-z.-]*)?)$")
             set(${out_var} "${CMAKE_MATCH_1}" PARENT_SCOPE)
             return()
         endif()
@@ -35,7 +35,7 @@ function(rex_compute_version out_var)
         return()
     endif()
 
-    if(NOT ARG_GIT_DESCRIBE_LONG MATCHES "^v([0-9]+)\\.([0-9]+)(\\.([0-9]+))?(\\.([0-9]+))?-([0-9]+)-g([0-9a-f]+)$")
+    if(NOT ARG_GIT_DESCRIBE_LONG MATCHES "^v([0-9]+)\\.([0-9]+)(\\.([0-9]+))?(\\.([0-9]+))?(-[0-9A-Za-z][0-9A-Za-z.-]*)?-([0-9]+)-g([0-9a-f]+)$")
         message(FATAL_ERROR "rex_compute_version: unparseable describe output '${ARG_GIT_DESCRIBE_LONG}'")
     endif()
     set(tag_minor ${CMAKE_MATCH_2})
@@ -44,8 +44,8 @@ function(rex_compute_version out_var)
     else()
         set(tag_patch 0)
     endif()
-    set(commit_count ${CMAKE_MATCH_7})
-    set(short_sha ${CMAKE_MATCH_8})
+    set(commit_count ${CMAKE_MATCH_8})
+    set(short_sha ${CMAKE_MATCH_9})
 
     # Floor minor must never go backwards.
     if(ARG_FLOOR_MINOR LESS tag_minor)
@@ -100,7 +100,6 @@ function(rex_resolve_version out_var)
     execute_process(
         COMMAND ${GIT_EXECUTABLE} describe --tags --exact-match
             --match "v[0-9]*.[0-9]*.[0-9]*"
-            --exclude "*-*"
         WORKING_DIRECTORY "${ARG_SOURCE_DIR}"
         OUTPUT_VARIABLE describe_exact
         ERROR_QUIET
@@ -113,7 +112,6 @@ function(rex_resolve_version out_var)
     execute_process(
         COMMAND ${GIT_EXECUTABLE} describe --tags --long
             --match "v[0-9]*.[0-9]*"
-            --exclude "*-*"
         WORKING_DIRECTORY "${ARG_SOURCE_DIR}"
         OUTPUT_VARIABLE describe_long
         ERROR_QUIET
