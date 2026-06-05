@@ -23,12 +23,28 @@ constexpr std::array<double, 6> kFrameCapRates = {60.0, 90.0, 120.0, 144.0, 165.
 constexpr std::array<const char*, 7> kFrameCapLabels = {"Unlimited", "60 FPS", "90 FPS",
                                                         "120 FPS", "144 FPS", "165 FPS",
                                                         "240 FPS"};
-constexpr std::array<std::string_view, 7> kCoreSimpleSettingsCvars = {
+
+struct UltrawideMode {
+  const char* label;
+  int width;
+  int height;
+};
+
+constexpr std::array<UltrawideMode, 4> kUltrawideModes = {{
+    {"Disabled (Native 16:9)", 0, 0},
+    {"Ultrawide (21:9)", 2560, 1080},
+    {"Super Ultrawide (32:9)", 3840, 1080},
+    {"Custom (set via CVars)", -1, -1}
+}};
+
+constexpr std::array<std::string_view, 9> kCoreSimpleSettingsCvars = {
     "resolution_scale",
     "draw_resolution_scale_x",
     "draw_resolution_scale_y",
     "fullscreen",
     "vsync",
+    "present_display_aspect_width",
+    "present_display_aspect_height",
     "mnk_mode",
     "mnk_capture_mouse"};
 
@@ -135,6 +151,38 @@ void SetTearingCvars(bool value) {
   }
 }
 
+int UltrawideModeFromCvar() {
+  int32_t width = rex::cvar::Query<int32_t>("present_display_aspect_width");
+  int32_t height = rex::cvar::Query<int32_t>("present_display_aspect_height");
+  
+  if (width == 0 && height == 0) {
+    return 0;  // Disabled
+  }
+  
+  for (int i = 1; i < static_cast<int>(kUltrawideModes.size()) - 1; ++i) {
+    if (kUltrawideModes[i].width == width && kUltrawideModes[i].height == height) {
+      return i;
+    }
+  }
+  
+  return static_cast<int>(kUltrawideModes.size()) - 1;  // Custom
+}
+
+void SetUltrawideCvars(int mode_index) {
+  if (mode_index < 0 || mode_index >= static_cast<int>(kUltrawideModes.size())) {
+    return;
+  }
+  
+  const auto& mode = kUltrawideModes[mode_index];
+  if (mode.width < 0 || mode.height < 0) {
+    // Custom mode - don't change CVars
+    return;
+  }
+  
+  rex::cvar::SetFlagByName("present_display_aspect_width", std::to_string(mode.width));
+  rex::cvar::SetFlagByName("present_display_aspect_height", std::to_string(mode.height));
+}
+
 void SectionTitle(const char* label) {
   ImGui::PushFont(nullptr, 20.0f);
   ImGui::TextUnformatted(label);
@@ -218,6 +266,7 @@ void SimpleSettingsDialog::LoadSettingsFromCvars() {
   fullscreen_ = rex::cvar::Query<bool>("fullscreen");
   vsync_ = rex::cvar::Query<bool>("vsync");
   tearing_ = TearingFromCvar();
+  ultrawide_mode_ = UltrawideModeFromCvar();
   mnk_mode_ = rex::cvar::Query<bool>("mnk_mode");
   mnk_capture_mouse_ = rex::cvar::Query<bool>("mnk_capture_mouse");
 }
@@ -228,6 +277,7 @@ bool SimpleSettingsDialog::HasSettingsChanges() const {
          fullscreen_ != rex::cvar::Query<bool>("fullscreen") ||
          vsync_ != rex::cvar::Query<bool>("vsync") ||
          tearing_ != TearingFromCvar() ||
+         ultrawide_mode_ != UltrawideModeFromCvar() ||
          mnk_mode_ != rex::cvar::Query<bool>("mnk_mode") ||
          mnk_capture_mouse_ != rex::cvar::Query<bool>("mnk_capture_mouse");
 }
@@ -283,6 +333,7 @@ void SimpleSettingsDialog::SaveVideo() {
   SetBoolCvar("fullscreen", fullscreen_);
   SetBoolCvar("vsync", vsync_);
   SetTearingCvars(tearing_);
+  SetUltrawideCvars(ultrawide_mode_);
   SetBoolCvar("mnk_mode", mnk_mode_);
   SetBoolCvar("mnk_capture_mouse", mnk_capture_mouse_);
   SaveSimpleSettingsConfig(config_path_);
@@ -399,6 +450,19 @@ void SimpleSettingsDialog::OnDraw(ImGuiIO& io) {
       ImGui::Combo("##frame_cap", &frame_cap_index_, kFrameCapLabels.data(),
                    static_cast<int>(kFrameCapLabels.size()));
       EndFieldRow();
+    }
+    
+    BeginFieldRow("Ultrawide Mode");
+    std::vector<const char*> ultrawide_labels;
+    for (const auto& mode : kUltrawideModes) {
+      ultrawide_labels.push_back(mode.label);
+    }
+    ImGui::Combo("##ultrawide_mode", &ultrawide_mode_, ultrawide_labels.data(),
+                 static_cast<int>(ultrawide_labels.size()));
+    EndFieldRow();
+    if (ultrawide_mode_ > 0) {
+      ImGui::TextColored(ImVec4(0.85f, 0.68f, 0.30f, 1.0f),
+                         "Experimental: Hor+ widens gameplay FOV");
     }
 
     ImGui::Separator();

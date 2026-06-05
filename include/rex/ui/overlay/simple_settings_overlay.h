@@ -71,6 +71,7 @@ class SimpleSettingsDialog final : public ImGuiDialog {
   bool fullscreen_ = true;
   bool vsync_ = false;
   bool tearing_ = true;
+  int ultrawide_mode_ = 0;
   bool mnk_mode_ = false;
   bool mnk_capture_mouse_ = false;
   int selected_tab_ = 0;
