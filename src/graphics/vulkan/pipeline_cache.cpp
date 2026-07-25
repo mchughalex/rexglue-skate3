@@ -409,6 +409,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     }
   }
 
+  // Load (or create) the persistent host pipeline cache so the driver reuses
+  // previously compiled pipeline binaries instead of recompiling every run.
+  InitializeHostPipelineCache(shader_storage_root);
+
   bool edram_fragment_shader_interlock =
       render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
 
@@ -740,8 +744,107 @@ void VulkanPipelineCache::ShutdownShaderStorage() {
     shader_storage_file_flush_needed_ = false;
   }
 
+  ShutdownHostPipelineCache();
+
   shader_storage_cache_root_.clear();
   shader_storage_title_id_ = 0;
+}
+
+void VulkanPipelineCache::InitializeHostPipelineCache(
+    const std::filesystem::path& shader_storage_root) {
+  ShutdownHostPipelineCache();
+  host_pipeline_cache_path_ = shader_storage_root / "vulkan_pipeline_cache.bin";
+
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  std::vector<uint8_t> initial_data;
+  if (FILE* file = rex::filesystem::OpenFile(host_pipeline_cache_path_, "rb")) {
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    if (size > 0) {
+      fseek(file, 0, SEEK_SET);
+      initial_data.resize(size_t(size));
+      if (fread(initial_data.data(), 1, initial_data.size(), file) != initial_data.size()) {
+        initial_data.clear();
+      }
+    }
+    fclose(file);
+  }
+
+  VkPipelineCacheCreateInfo create_info = {};
+  create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+  create_info.initialDataSize = initial_data.size();
+  create_info.pInitialData = initial_data.empty() ? nullptr : initial_data.data();
+  // Stale/foreign blobs are safe to feed: the driver checks the header
+  // (vendor/device/UUID) and just starts empty if it doesn't match.
+  VkResult result =
+      dfn.vkCreatePipelineCache(device, &create_info, nullptr, &host_pipeline_cache_);
+  if (result != VK_SUCCESS) {
+    host_pipeline_cache_ = VK_NULL_HANDLE;
+    REXGPU_WARN("VulkanPipelineCache: failed to create host pipeline cache (result={})",
+                int32_t(result));
+    return;
+  }
+  REXGPU_INFO("VulkanPipelineCache: host pipeline cache ready ({} bytes preloaded)",
+              initial_data.size());
+  host_pipeline_cache_dirty_ = false;
+}
+
+void VulkanPipelineCache::SaveHostPipelineCache() {
+  if (host_pipeline_cache_ == VK_NULL_HANDLE || !host_pipeline_cache_dirty_ ||
+      host_pipeline_cache_path_.empty()) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  size_t data_size = 0;
+  if (dfn.vkGetPipelineCacheData(device, host_pipeline_cache_, &data_size, nullptr) != VK_SUCCESS ||
+      data_size == 0) {
+    return;
+  }
+  std::vector<uint8_t> data(data_size);
+  if (dfn.vkGetPipelineCacheData(device, host_pipeline_cache_, &data_size, data.data()) !=
+      VK_SUCCESS) {
+    return;
+  }
+  // Write to a temp file then rename, so an unclean exit can't truncate the cache.
+  std::filesystem::path tmp_path = host_pipeline_cache_path_;
+  tmp_path += ".tmp";
+  if (FILE* file = rex::filesystem::OpenFile(tmp_path, "wb")) {
+    bool ok = fwrite(data.data(), 1, data_size, file) == data_size;
+    fclose(file);
+    std::error_code ec;
+    if (ok) {
+      std::filesystem::rename(tmp_path, host_pipeline_cache_path_, ec);
+      if (ec) {
+        std::filesystem::remove(host_pipeline_cache_path_, ec);
+        std::filesystem::rename(tmp_path, host_pipeline_cache_path_, ec);
+      }
+    } else {
+      std::filesystem::remove(tmp_path, ec);
+    }
+  }
+  host_pipeline_cache_dirty_ = false;
+}
+
+void VulkanPipelineCache::ShutdownHostPipelineCache() {
+  if (host_pipeline_cache_ == VK_NULL_HANDLE) {
+    host_pipeline_cache_path_.clear();
+    host_pipeline_cache_dirty_ = false;
+    return;
+  }
+  SaveHostPipelineCache();
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  dfn.vkDestroyPipelineCache(device, host_pipeline_cache_, nullptr);
+  host_pipeline_cache_ = VK_NULL_HANDLE;
+  host_pipeline_cache_path_.clear();
+  host_pipeline_cache_dirty_ = false;
 }
 
 void VulkanPipelineCache::EndSubmission() {
@@ -758,6 +861,15 @@ void VulkanPipelineCache::EndSubmission() {
     storage_write_request_cond_.notify_one();
     shader_storage_file_flush_needed_ = false;
     pipeline_storage_file_flush_needed_ = false;
+  }
+
+  // Persist the host pipeline-cache blob periodically while it has new compiled
+  // binaries, so they survive even an unclean (force-stop) exit. Throttled so
+  // vkGetPipelineCacheData isn't called every frame; after warm-up the cache
+  // stops getting dirty and this no-ops.
+  if (host_pipeline_cache_dirty_ && ++host_pipeline_cache_save_throttle_ >= 64) {
+    SaveHostPipelineCache();
+    host_pipeline_cache_save_throttle_ = 0;
   }
 
   if (!creation_threads_.empty()) {
@@ -3488,8 +3600,11 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   VkPipeline pipeline;
-  VkResult create_result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+  VkResult create_result = dfn.vkCreateGraphicsPipelines(device, host_pipeline_cache_, 1,
                                                          &pipeline_create_info, nullptr, &pipeline);
+  if (create_result == VK_SUCCESS && host_pipeline_cache_ != VK_NULL_HANDLE) {
+    host_pipeline_cache_dirty_ = true;
+  }
   if (create_result != VK_SUCCESS) {
     uint64_t ps_hash = creation_arguments.pixel_shader
                            ? creation_arguments.pixel_shader->shader().ucode_data_hash()

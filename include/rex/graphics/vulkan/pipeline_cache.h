@@ -444,6 +444,18 @@ class VulkanPipelineCache {
   FILE* pipeline_storage_file_ = nullptr;
   bool pipeline_storage_file_flush_needed_ = false;
 
+  // Disk-backed host VkPipelineCache. We already persist the guest shader
+  // ucode and pipeline descriptions, but the driver's compiled pipeline blobs
+  // were thrown away every run; keeping them avoids re-compiling SPIR-V on each
+  // launch (noticeable on mobile drivers).
+  VkPipelineCache host_pipeline_cache_ = VK_NULL_HANDLE;
+  std::filesystem::path host_pipeline_cache_path_;
+  bool host_pipeline_cache_dirty_ = false;
+  uint32_t host_pipeline_cache_save_throttle_ = 0;
+  void InitializeHostPipelineCache(const std::filesystem::path& shader_storage_root);
+  void SaveHostPipelineCache();
+  void ShutdownHostPipelineCache();
+
   // Thread for asynchronous writing to the storage streams.
   void StorageWriteThread();
   std::mutex storage_write_request_lock_;
