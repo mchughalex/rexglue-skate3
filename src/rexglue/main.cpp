@@ -161,6 +161,11 @@ int main(int argc, char** argv) {
   } else {
     rexglue::ui::DoneSummary(elapsed);
   }
-  rexglue::ui::Shutdown();
-  return exit_code;
+  // Hard-exit instead of the graceful Shutdown() + destructor/static-atexit
+  // teardown: after a successful codegen run the process can segfault during
+  // that teardown (logging/UI sink lifetime ordering), turning a fully
+  // successful generation into a non-zero exit for the build system. All
+  // generated files are already flushed and closed by CodegenWriter before
+  // this point, so _Exit cannot lose output.
+  _Exit(exit_code);
 }
