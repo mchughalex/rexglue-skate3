@@ -361,6 +361,7 @@ GTKWindow::GTKWindow(WindowedAppContext& app_context, const std::string_view tit
 
 GTKWindow::~GTKWindow() {
   EnterDestructor();
+  CancelPendingPaintRequest();
   if (cursor_auto_hide_timer_) {
     g_source_remove(cursor_auto_hide_timer_);
     cursor_auto_hide_timer_ = 0;
@@ -687,6 +688,44 @@ void GTKWindow::RequestPaintImpl() {
   gtk_widget_queue_draw(drawing_area_);
 }
 
+void GTKWindow::RequestPaintImmediateImpl() {
+  // GTK draw signals are frame-clock paced. A new guest frame must be able to
+  // present sooner, without touching widgets from the guest output thread.
+  std::lock_guard<std::mutex> paint_idle_pending_lock(paint_idle_pending_mutex_);
+  if (!paint_idle_pending_) {
+    // Pending UI functions (including SDL controller pumping) have a higher
+    // priority, so a stream of guest frames can't starve input updates.
+    paint_idle_pending_ =
+        gdk_threads_add_idle_full(G_PRIORITY_DEFAULT_IDLE, PaintSourceFunc, this, nullptr);
+  }
+}
+
+void GTKWindow::CancelPendingPaintRequest() {
+  std::lock_guard<std::mutex> paint_idle_pending_lock(paint_idle_pending_mutex_);
+  if (paint_idle_pending_) {
+    g_source_remove(paint_idle_pending_);
+    paint_idle_pending_ = 0;
+  }
+}
+
+gboolean GTKWindow::PaintSourceFunc(gpointer data) {
+  auto& window = *static_cast<GTKWindow*>(data);
+  {
+    std::lock_guard<std::mutex> paint_idle_pending_lock(window.paint_idle_pending_mutex_);
+    window.paint_idle_pending_ = 0;
+  }
+  if (!window.drawing_area_ || !gtk_widget_get_mapped(window.drawing_area_)) {
+    return G_SOURCE_REMOVE;
+  }
+  if (window.batched_size_update_depth_) {
+    window.batched_size_update_contained_immediate_paint_ = true;
+  } else {
+    window.OnPaint();
+  }
+  // Painting may close or destroy the window. Don't access it again here.
+  return G_SOURCE_REMOVE;
+}
+
 void GTKWindow::HandleSizeUpdate(WindowDestructionReceiver& destruction_receiver) {
   if (!drawing_area_) {
     // Batched size update ended when the window has already been closed, for
@@ -737,6 +776,10 @@ void GTKWindow::EndBatchedSizeUpdate(WindowDestructionReceiver& destruction_rece
   if (batched_size_update_contained_draw_) {
     batched_size_update_contained_draw_ = false;
     RequestPaint();
+  }
+  if (batched_size_update_contained_immediate_paint_) {
+    batched_size_update_contained_immediate_paint_ = false;
+    RequestPaint(true);
   }
 }
 
@@ -859,6 +902,7 @@ gboolean GTKWindow::WindowEventHandler(GdkEvent* event) {
       if (destruction_receiver.IsWindowDestroyed()) {
         break;
       }
+      CancelPendingPaintRequest();
       // Set window_ to null to ignore events from now on since this
       // ui::GTKWindow is entering an indeterminate state - this should be done
       // at some point in closing anyway.
@@ -1021,6 +1065,8 @@ gboolean GTKWindow::DrawHandler(GtkWidget* widget, cairo_t* cr, gpointer user_da
   if (window->batched_size_update_depth_) {
     window->batched_size_update_contained_draw_ = true;
   } else {
+    // A native expose may satisfy the request before the idle source runs.
+    window->CancelPendingPaintRequest();
     window->OnPaint();
   }
   return TRUE;

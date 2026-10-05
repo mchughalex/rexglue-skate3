@@ -1620,10 +1620,16 @@ bool Presenter::RequestPaintOrConnectionRecoveryViaWindow(bool force_ui_thread_p
     ForceUIThreadPaintTick();
   }
   if (ui_thread_paint_requested_.exchange(true, std::memory_order_relaxed)) {
-    // Invalidation pending already, no need to do it twice.
+    // A UI-only request may already be waiting for a platform frame tick.
+    // Promote it when guest output arrives; the window coalesces immediate
+    // requests so a stream of frames won't accumulate callbacks.
+    if (force_ui_thread_paint_tick) {
+      window_->RequestPaint(true);
+      return true;
+    }
     return false;
   }
-  window_->RequestPaint();
+  window_->RequestPaint(force_ui_thread_paint_tick);
   return true;
 }
 

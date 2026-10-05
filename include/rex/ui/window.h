@@ -353,9 +353,15 @@ class Window {
   // long as they know the Surface exists and isn't in the middle of being
   // changed to another (the synchronization of this fact between the UI thread
   // and the caller thread must be done externally through OnSurfaceChanged).
-  void RequestPaint() {
+  // Immediate requests (new guest output or surface recovery) should bypass
+  // platform UI frame pacing where possible. UI-only animation stays paced.
+  void RequestPaint(bool immediate = false) {
     if (presenter_surface_) {
-      RequestPaintImpl();
+      if (immediate) {
+        RequestPaintImmediateImpl();
+      } else {
+        RequestPaintImpl();
+      }
     }
   }
   void RequestPresenterUIPaintFromUIThread() {
@@ -566,6 +572,7 @@ class Window {
   virtual std::unique_ptr<Surface> CreateSurfaceImpl(Surface::TypeFlags allowed_types) = 0;
   // Called only if the Surface exists.
   virtual void RequestPaintImpl() = 0;
+  virtual void RequestPaintImmediateImpl() { RequestPaintImpl(); }
 
   // Will also disconnect the surface if needed.
   void OnBeforeClose(WindowDestructionReceiver& destruction_receiver);

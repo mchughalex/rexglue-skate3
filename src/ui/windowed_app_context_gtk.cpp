@@ -33,7 +33,11 @@ void GTKWindowedAppContext::NotifyUILoopOfPendingFunctions() {
   std::lock_guard<std::mutex> pending_functions_idle_pending_lock(
       pending_functions_idle_pending_mutex_);
   if (!pending_functions_idle_pending_) {
-    pending_functions_idle_pending_ = gdk_threads_add_idle(PendingFunctionsSourceFunc, this);
+    // SDL controller pumping is queued here by guest input reads. Dispatch it
+    // before GTK redraws and guest paints rather than returning stale input
+    // while a continuously ready paint source keeps default idle work waiting.
+    pending_functions_idle_pending_ =
+        gdk_threads_add_idle_full(G_PRIORITY_DEFAULT, PendingFunctionsSourceFunc, this, nullptr);
   }
 }
 

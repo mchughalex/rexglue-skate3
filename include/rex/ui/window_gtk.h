@@ -12,6 +12,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include <rex/platform.h>
@@ -51,6 +52,7 @@ class GTKWindow : public Window {
 
   std::unique_ptr<Surface> CreateSurfaceImpl(Surface::TypeFlags allowed_types) override;
   void RequestPaintImpl() override;
+  void RequestPaintImmediateImpl() override;
 
  private:
   void UpdateDpi(WindowDestructionReceiver* destruction_receiver = nullptr);
@@ -76,6 +78,13 @@ class GTKWindow : public Window {
   static gboolean DrawingAreaEventHandlerThunk(GtkWidget* widget, GdkEvent* event,
                                                gpointer user_data);
   static gboolean DrawHandler(GtkWidget* widget, cairo_t* cr, gpointer data);
+  void CancelPendingPaintRequest();
+  static gboolean PaintSourceFunc(gpointer data);
+
+  // Requests may come from the guest output thread, but the source paints only
+  // on the UI thread. Clear its ID before painting so new requests aren't lost.
+  std::mutex paint_idle_pending_mutex_;
+  guint paint_idle_pending_ = 0;
 
   // Non-owning (initially floating) references to the widgets.
   GtkWidget* window_ = nullptr;
@@ -89,6 +98,7 @@ class GTKWindow : public Window {
   uint32_t batched_size_update_depth_ = 0;
   bool batched_size_update_contained_configure_ = false;
   bool batched_size_update_contained_draw_ = false;
+  bool batched_size_update_contained_immediate_paint_ = false;
 };
 
 class GTKMenuItem : public MenuItem {
