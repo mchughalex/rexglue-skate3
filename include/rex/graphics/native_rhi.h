@@ -140,6 +140,7 @@ enum class CompareFunc : uint32_t {
   kAlways = 0,
   kLess,
   kLessEqual,
+  kEqual,
 };
 
 enum class CullMode : uint32_t {

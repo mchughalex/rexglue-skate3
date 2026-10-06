@@ -260,6 +260,8 @@ D3D12_COMPARISON_FUNC ToCompare(nrhi::CompareFunc func) {
       return D3D12_COMPARISON_FUNC_LESS;
     case nrhi::CompareFunc::kLessEqual:
       return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    case nrhi::CompareFunc::kEqual:
+      return D3D12_COMPARISON_FUNC_EQUAL;
     case nrhi::CompareFunc::kAlways:
     default:
       return D3D12_COMPARISON_FUNC_ALWAYS;

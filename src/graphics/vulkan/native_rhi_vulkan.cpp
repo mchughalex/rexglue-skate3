@@ -229,6 +229,8 @@ VkCompareOp ToVkCompare(nrhi::CompareFunc func) {
       return VK_COMPARE_OP_LESS;
     case nrhi::CompareFunc::kLessEqual:
       return VK_COMPARE_OP_LESS_OR_EQUAL;
+    case nrhi::CompareFunc::kEqual:
+      return VK_COMPARE_OP_EQUAL;
     case nrhi::CompareFunc::kAlways:
     default:
       return VK_COMPARE_OP_ALWAYS;
