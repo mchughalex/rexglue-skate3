@@ -356,10 +356,12 @@ std::unique_ptr<Window> Window::Create(WindowedAppContext& app_context,
 GTKWindow::GTKWindow(WindowedAppContext& app_context, const std::string_view title,
                      uint32_t desired_logical_width, uint32_t desired_logical_height)
     : Window(app_context, title, desired_logical_width, desired_logical_height) {
+  paint_request_state_->window = this;
   dpi_ = QueryWidgetDpi(nullptr);
 }
 
 GTKWindow::~GTKWindow() {
+  paint_request_state_->window = nullptr;
   EnterDestructor();
   if (cursor_auto_hide_timer_) {
     g_source_remove(cursor_auto_hide_timer_);
@@ -684,7 +686,15 @@ std::unique_ptr<Surface> GTKWindow::CreateSurfaceImpl(Surface::TypeFlags allowed
 }
 
 void GTKWindow::RequestPaintImpl() {
-  gtk_widget_queue_draw(drawing_area_);
+  // RequestPaint may be called by the GPU thread, but GTK widgets must only be
+  // accessed by the UI thread. Don't capture this: a queued request may outlive
+  // the window that submitted it.
+  app_context().CallInUIThread([state = paint_request_state_]() {
+    GTKWindow* window = state->window;
+    if (window && window->drawing_area_) {
+      gtk_widget_queue_draw(window->drawing_area_);
+    }
+  });
 }
 
 void GTKWindow::HandleSizeUpdate(WindowDestructionReceiver& destruction_receiver) {

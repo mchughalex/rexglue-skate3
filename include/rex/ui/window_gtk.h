@@ -53,6 +53,14 @@ class GTKWindow : public Window {
   void RequestPaintImpl() override;
 
  private:
+  // Only the UI thread reads or clears the window pointer. Queued paint
+  // callbacks keep this state alive without extending the window's lifetime.
+  struct PaintRequestState {
+    GTKWindow* window = nullptr;
+  };
+  const std::shared_ptr<PaintRequestState> paint_request_state_ =
+      std::make_shared<PaintRequestState>();
+
   void UpdateDpi(WindowDestructionReceiver* destruction_receiver = nullptr);
   void HandleSizeUpdate(WindowDestructionReceiver& destruction_receiver);
   // For updating multiple factors that may influence the window size at once,
