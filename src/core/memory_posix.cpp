@@ -417,6 +417,15 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
     shm_unlink(full_path.c_str());
     return kFileMappingHandleInvalid;
   }
+  // Unlink the name straight away. The descriptor and the views mapped from
+  // it keep the backing object alive, and the kernel frees it when the last
+  // reference goes, whatever way the process ends. Leaving the name in place
+  // until CloseFileMappingHandle meant a crash or SIGKILL left a
+  // /dev/shm/xenia_memory_* file behind (hundreds of MB each, 4.5 GB sparse)
+  // that kept counting against the shm tmpfs limit. A handful of leaked runs
+  // filled it, after which every process that faulted in a fresh tmpfs page,
+  // Steam's overlay and client included, died with SIGBUS.
+  shm_unlink(full_path.c_str());
   return static_cast<FileMappingHandle>(ret);
 #endif
 }
@@ -424,6 +433,8 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
 void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
   close(static_cast<int>(handle));
 #if !REX_PLATFORM_ANDROID
+  // The name was already unlinked in CreateFileMappingHandle; this is kept for
+  // objects created by older code and is a harmless ENOENT otherwise.
   auto full_path = MakeShmName(path);
   shm_unlink(full_path.c_str());
 #endif
