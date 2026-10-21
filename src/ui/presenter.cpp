@@ -35,6 +35,13 @@
 REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
                     "Allow presentation from non-UI thread");
 
+REXCVAR_DEFINE_UINT32(presenter_paint_request_reissue_ms, 250, "UI/Presenter",
+                      "Re-issue a window paint request that has been pending for this many "
+                      "milliseconds without the window painting (0 = never). Recovers from "
+                      "paint requests dropped by the window system, which otherwise freeze "
+                      "the picture while the game keeps running")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(presenter_strict_guest_output_backpressure, false, "UI/Presenter",
                     "Block guest output when it would replace an unpresented frame in the "
                     "presenter mailbox")
@@ -474,6 +481,11 @@ void Presenter::PaintFromUIThread(bool force_paint) {
   // for example.
   if (ui_thread_paint_requested_.exchange(false, std::memory_order_relaxed)) {
     do_paint = true;
+    uint32_t reissues = ui_thread_paint_request_reissues_.exchange(0, std::memory_order_relaxed);
+    if (reissues) {
+      REXLOG_INFO("Presenter: window painting resumed after {} paint request re-issue(s)",
+                  reissues);
+    }
   }
   PaintResult paint_result = PaintResult::kNotPresented;
   bool request_repaint_at_tick = false;
@@ -1619,10 +1631,41 @@ bool Presenter::RequestPaintOrConnectionRecoveryViaWindow(bool force_ui_thread_p
   if (force_ui_thread_paint_tick) {
     ForceUIThreadPaintTick();
   }
+  const uint64_t now_ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count()) +
+                          1;
   if (ui_thread_paint_requested_.exchange(true, std::memory_order_relaxed)) {
-    // Invalidation pending already, no need to do it twice.
-    return false;
+    // Invalidation pending already, no need to do it twice - unless it has
+    // been pending for so long that the window system has evidently dropped
+    // it. Nothing else would ever clear ui_thread_paint_requested_ then, and
+    // the picture would freeze for good while the guest keeps rendering.
+    const uint32_t reissue_ms = REXCVAR_GET(presenter_paint_request_reissue_ms);
+    if (!reissue_ms) {
+      return false;
+    }
+    uint64_t requested_ms = ui_thread_paint_request_time_ms_.load(std::memory_order_relaxed);
+    if (!requested_ms || now_ms - requested_ms < reissue_ms) {
+      return false;
+    }
+    // Only one caller re-issues per interval.
+    if (!ui_thread_paint_request_time_ms_.compare_exchange_strong(requested_ms, now_ms,
+                                                                  std::memory_order_relaxed)) {
+      return false;
+    }
+    const uint32_t reissue =
+        ui_thread_paint_request_reissues_.fetch_add(1, std::memory_order_relaxed) + 1;
+    // 1, 2, 4, 8... so a long stall (such as a minimized window) doesn't spam.
+    if (!(reissue & (reissue - 1))) {
+      REXLOG_WARN(
+          "Presenter: window paint request pending for {} ms without a paint, re-issuing "
+          "(re-issue {} of this stall)",
+          now_ms - requested_ms, reissue);
+    }
+    window_->RequestPaint();
+    return true;
   }
+  ui_thread_paint_request_time_ms_.store(now_ms, std::memory_order_relaxed);
   window_->RequestPaint();
   return true;
 }

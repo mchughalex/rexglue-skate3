@@ -355,12 +355,16 @@ std::unique_ptr<Window> Window::Create(WindowedAppContext& app_context,
 
 GTKWindow::GTKWindow(WindowedAppContext& app_context, const std::string_view title,
                      uint32_t desired_logical_width, uint32_t desired_logical_height)
-    : Window(app_context, title, desired_logical_width, desired_logical_height) {
+    : Window(app_context, title, desired_logical_width, desired_logical_height),
+      paint_request_state_(std::make_shared<PaintRequestState>()) {
+  paint_request_state_->window = this;
   dpi_ = QueryWidgetDpi(nullptr);
 }
 
 GTKWindow::~GTKWindow() {
   EnterDestructor();
+  // A paint idle callback may still be queued, make it a no-op.
+  paint_request_state_->window = nullptr;
   if (cursor_auto_hide_timer_) {
     g_source_remove(cursor_auto_hide_timer_);
     cursor_auto_hide_timer_ = 0;
@@ -684,7 +688,54 @@ std::unique_ptr<Surface> GTKWindow::CreateSurfaceImpl(Surface::TypeFlags allowed
 }
 
 void GTKWindow::RequestPaintImpl() {
-  gtk_widget_queue_draw(drawing_area_);
+  // May be called from any thread - see PaintRequestState in the header.
+  PaintRequestState& state = *paint_request_state_;
+  bool expected = false;
+  if (!state.pending.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
+                                             std::memory_order_acquire)) {
+    // Already queued, the queued paint will pick up the latest guest output.
+    return;
+  }
+  // Default idle priority (the same as WindowedAppContext's deferred UI thread
+  // functions), so continuous painting can't starve those, and input events
+  // (default priority) are still handled first.
+  g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, PaintRequestIdleCallback,
+                  new std::shared_ptr<PaintRequestState>(paint_request_state_),
+                  PaintRequestIdleDestroy);
+}
+
+gboolean GTKWindow::PaintRequestIdleCallback(gpointer user_data) {
+  PaintRequestState& state = **static_cast<std::shared_ptr<PaintRequestState>*>(user_data);
+  // Clear before painting, so a request made during the paint queues another
+  // one rather than being dropped.
+  state.pending.store(false, std::memory_order_release);
+  GTKWindow* window = state.window;
+  if (!window || !window->drawing_area_) {
+    return G_SOURCE_REMOVE;
+  }
+  // Don't paint into a window that isn't shown (unmapped or minimized). GTK
+  // emits "draw" (DrawHandler) when it's shown again, and the presenter also
+  // re-issues requests that stay pending for too long.
+  if (!gtk_widget_is_drawable(window->drawing_area_)) {
+    return G_SOURCE_REMOVE;
+  }
+  if (window->window_) {
+    GdkWindow* gdk_window = gtk_widget_get_window(window->window_);
+    if (gdk_window && (gdk_window_get_state(gdk_window) &
+                       (GDK_WINDOW_STATE_ICONIFIED | GDK_WINDOW_STATE_WITHDRAWN))) {
+      return G_SOURCE_REMOVE;
+    }
+  }
+  if (window->batched_size_update_depth_) {
+    window->batched_size_update_contained_draw_ = true;
+  } else {
+    window->OnPaint();
+  }
+  return G_SOURCE_REMOVE;
+}
+
+void GTKWindow::PaintRequestIdleDestroy(gpointer user_data) {
+  delete static_cast<std::shared_ptr<PaintRequestState>*>(user_data);
 }
 
 void GTKWindow::HandleSizeUpdate(WindowDestructionReceiver& destruction_receiver) {
