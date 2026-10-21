@@ -10,7 +10,12 @@
  */
 
 #include <rex/logging.h>
+#include <rex/platform.h>
 #include <rex/ui/renderdoc_api.h>
+
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+#include <dlfcn.h>
+#endif
 
 namespace rex {
 namespace ui {
@@ -19,6 +24,19 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
   std::unique_ptr<RenderDocAPI> renderdoc_api(new RenderDocAPI());
 
   pRENDERDOC_GetAPI get_api = nullptr;
+
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+  // "Connected" means RenderDoc injected its library before we started. Only
+  // accept a library that is already mapped: a plain dlopen would also load a
+  // system-wide librenderdoc.so (SteamOS ships one in /usr/lib), which then
+  // hooks the Vulkan entry points of every run, turns on GPU debug markers
+  // and sits in the present path for no benefit.
+  if (void* already = dlopen(platform::lib_names::kRenderDoc, RTLD_LAZY | RTLD_NOLOAD)) {
+    dlclose(already);
+  } else {
+    return nullptr;
+  }
+#endif
 
   // Try to load the RenderDoc library. If RenderDoc is attached, the library
   // should already be loaded into the process and this will increment the
