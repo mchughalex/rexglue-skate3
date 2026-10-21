@@ -5,7 +5,17 @@
 namespace rex::kernel::guest_presence {
 namespace {
 
-std::atomic<uint32_t> g_gameplay_context_value{0};
+// Not 0 before the title has set the context: 0 means "frontend/loading" to
+// the consumers, and the native renderer evaluates it from its first frame.
+// When that frame came before the title's boot-time XUserSetContext(0x8001, 7)
+// (an intermittent startup race), the renderer entered its native loading
+// screen state at 0 and then flipped to native gameplay rendering at 7, in the
+// middle of the intro movie, with nothing to draw: the boot stalled with no
+// frames presented (seen in the stock build too). An unset value compares like
+// the boot value 7 (!= 0 and != 1), so every boot now takes the path the
+// winning side of the race always took.
+constexpr uint32_t kContextUnset = 0xFFFFFFFFu;
+std::atomic<uint32_t> g_gameplay_context_value{kContextUnset};
 
 }  // namespace
 

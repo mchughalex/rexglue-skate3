@@ -13,7 +13,9 @@ namespace rex::kernel::guest_presence {
 void NotifyContext(uint32_t user_index, uint32_t context_id, uint32_t value);
 
 // Live value of the Skate 3 presence context 0x8001 (1 = in gameplay,
-// 0 = frontend / pause menu / loading).
+// 0 = frontend / pause menu / loading, 7 = boot, set once by the title at
+// startup). 0xFFFFFFFF until the title sets it, which compares like the boot
+// value (neither 0 nor 1).
 uint32_t GameplayContextValue();
 
 }  // namespace rex::kernel::guest_presence
