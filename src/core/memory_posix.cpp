@@ -9,11 +9,14 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <string>
 
 #include <fcntl.h>
@@ -219,6 +222,118 @@ static PageAccess PermsToPageAccess(const char perms[5]) {
   return w ? PageAccess::kReadWrite : PageAccess::kReadOnly;
 }
 
+// ---------------------------------------------------------------------------
+// Protection shadow (see RegisterProtectionShadow in the header).
+//
+// One byte per host page of the registered range: the effective host access
+// (0 none, 1 read, 2 read/write - execute requests are served without
+// PROT_EXEC, see ToPosixProtectFlags) or kShadowUnknown, which makes
+// QueryProtect fall back to /proc/self/maps for that page.
+//
+// Ordering: a page that gains access is recorded BEFORE the syscall, a page
+// that loses access AFTER it. A racing reader (the MMIO handler re-checking
+// whether a watch it hit has already been cleared) can therefore only see a
+// page as accessible slightly early, in which case it retries the access and
+// faults again until the change lands; it never sees a page as protected
+// after access has been granted. A failed syscall marks the pages unknown.
+constexpr uint8_t kShadowUnknown = 0xFF;
+
+struct ShadowTable {
+  uintptr_t begin = 0;  // page-aligned
+  uintptr_t end = 0;    // page-aligned, exclusive
+  std::unique_ptr<std::atomic<uint8_t>[]> codes;
+};
+// Published whole, so readers never see a pointer and a range that disagree.
+// A replaced table is intentionally leaked: a concurrent reader may still hold it.
+std::atomic<ShadowTable*> g_shadow{nullptr};
+
+uint8_t ShadowCode(PageAccess access) {
+  const uint32_t prot = ToPosixProtectFlags(access);
+  if (prot & PROT_WRITE) {
+    return 2;
+  }
+  return (prot & PROT_READ) ? 1 : 0;
+}
+
+PageAccess ShadowAccess(uint8_t code) {
+  return code == 2 ? PageAccess::kReadWrite
+                   : (code == 1 ? PageAccess::kReadOnly : PageAccess::kNoAccess);
+}
+
+// Host page indices [first, last) of the shadow touched by [address, +length).
+ShadowTable* ShadowPages(const void* address, size_t length, size_t& first, size_t& last) {
+  ShadowTable* shadow = g_shadow.load(std::memory_order_acquire);
+  if (!shadow || !length) {
+    return nullptr;
+  }
+  const uintptr_t page_mask = uintptr_t(page_size() - 1);
+  uintptr_t begin = reinterpret_cast<uintptr_t>(address) & ~page_mask;
+  uintptr_t end = reinterpret_cast<uintptr_t>(address) + length;
+  if (end < begin) {
+    end = UINTPTR_MAX;
+  }
+  begin = std::max(begin, shadow->begin);
+  end = std::min(end, shadow->end);
+  if (begin >= end) {
+    return nullptr;
+  }
+  const size_t page_bytes = page_size();
+  first = (begin - shadow->begin) / page_bytes;
+  last = (end - shadow->begin + page_bytes - 1) / page_bytes;
+  return shadow;
+}
+
+void ShadowStore(const void* address, size_t length, uint8_t code) {
+  size_t first, last;
+  if (ShadowTable* shadow = ShadowPages(address, length, first, last)) {
+    for (size_t i = first; i < last; ++i) {
+      shadow->codes[i].store(code, std::memory_order_release);
+    }
+  }
+}
+
+// Before a protection change: record pages that are about to become more
+// accessible (unknown pages stay unknown).
+void ShadowBeginChange(const void* address, size_t length, uint8_t code) {
+  size_t first, last;
+  if (ShadowTable* shadow = ShadowPages(address, length, first, last)) {
+    for (size_t i = first; i < last; ++i) {
+      const uint8_t old = shadow->codes[i].load(std::memory_order_relaxed);
+      if (old != kShadowUnknown && code > old) {
+        shadow->codes[i].store(code, std::memory_order_release);
+      }
+    }
+  }
+}
+
+// After a protection change: record the final state, or unknown on failure.
+void ShadowEndChange(const void* address, size_t length, uint8_t code, bool succeeded) {
+  ShadowStore(address, length, succeeded ? code : kShadowUnknown);
+}
+
+bool ShadowQuery(const void* address, PageAccess& access_out, size_t& length_out) {
+  size_t first, last;
+  ShadowTable* shadow = ShadowPages(address, 1, first, last);
+  if (!shadow) {
+    return false;
+  }
+  const uint8_t code = shadow->codes[first].load(std::memory_order_acquire);
+  if (code == kShadowUnknown) {
+    return false;
+  }
+  // Length of the run of identically protected pages, like the extent of a
+  // /proc/self/maps entry (bounded so the query stays O(1)-ish).
+  const size_t total = (shadow->end - shadow->begin) / page_size();
+  size_t run_end = first + 1;
+  while (run_end < total && run_end - first < 4096 &&
+         shadow->codes[run_end].load(std::memory_order_relaxed) == code) {
+    ++run_end;
+  }
+  length_out = run_end * page_size() + shadow->begin - reinterpret_cast<uintptr_t>(address);
+  access_out = ShadowAccess(code);
+  return true;
+}
+
 }  // namespace
 #endif  // REX_PLATFORM_LINUX
 
@@ -268,7 +383,19 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
   }
 #endif
 
+#if REX_PLATFORM_LINUX
+  const uint8_t initial_code = prot_initial == PROT_NONE ? 0 : ShadowCode(access);
+  if (base_address) {
+    ShadowBeginChange(base_address, length, initial_code);
+  }
+#endif
   void* result = mmap(base_address, length, prot_initial, flags, -1, 0);
+#if REX_PLATFORM_LINUX
+  if (base_address) {
+    // EEXIST leaves the existing mapping as it was, so it is not a known state.
+    ShadowEndChange(base_address, length, initial_code, result != MAP_FAILED);
+  }
+#endif
   if (result != MAP_FAILED) {
     return result;
   }
@@ -280,7 +407,11 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
        allocation_type == AllocationType::kReserveCommit)) {
     // Verify the entire range is mapped before using mprotect
     if (IsRangeFullyMapped(base_address, length)) {
-      if (mprotect(base_address, length, static_cast<int>(prot_requested)) == 0) {
+      const uint8_t code = ShadowCode(access);
+      ShadowBeginChange(base_address, length, code);
+      const bool ok = mprotect(base_address, length, static_cast<int>(prot_requested)) == 0;
+      ShadowEndChange(base_address, length, code, ok);
+      if (ok) {
         return base_address;
       }
     }
@@ -298,15 +429,25 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
       AlignHostPageRange(base_address, length);
 #endif
       if (mprotect(base_address, length, PROT_NONE) != 0) {
+#if REX_PLATFORM_LINUX
+        ShadowStore(base_address, length, kShadowUnknown);
+#endif
         return false;
       }
+#if REX_PLATFORM_LINUX
+      ShadowStore(base_address, length, 0);
+#endif
 #if defined(MADV_DONTNEED)
       (void)madvise(base_address, length, MADV_DONTNEED);
 #endif
       return true;
     }
     case DeallocationType::kRelease: {
-      return munmap(base_address, length) == 0;
+      const bool ok = munmap(base_address, length) == 0;
+#if REX_PLATFORM_LINUX
+      ShadowStore(base_address, length, ok ? 0 : kShadowUnknown);
+#endif
+      return ok;
     }
     default:
       // how we get here? :(
@@ -327,9 +468,12 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
   //             atomic in a mutli-threaded process either, but it's something to be aware of.
   // Query old access before changing, if the caller needs it
   if (out_old_access) {
-    LinuxMapEntry e;
-    if (FindEntryForAddress(base_address, e)) {
-      *out_old_access = PermsToPageAccess(e.perms);
+    size_t unused_length = 0;
+    if (!ShadowQuery(base_address, *out_old_access, unused_length)) {
+      LinuxMapEntry e;
+      if (FindEntryForAddress(base_address, e)) {
+        *out_old_access = PermsToPageAccess(e.perms);
+      }
     }
   }
 #endif
@@ -338,7 +482,53 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
 #if REX_PLATFORM_MAC
   AlignHostPageRange(base_address, length);
 #endif
+#if REX_PLATFORM_LINUX
+  const uint8_t code = ShadowCode(access);
+  ShadowBeginChange(base_address, length, code);
+  const bool ok = mprotect(base_address, length, prot) == 0;
+  ShadowEndChange(base_address, length, code, ok);
+  return ok;
+#else
   return mprotect(base_address, length, prot) == 0;
+#endif
+}
+
+void RegisterProtectionShadow(void* base, size_t length) {
+#if REX_PLATFORM_LINUX
+  if (!base || !length) {
+    return;
+  }
+  const size_t page_bytes = page_size();
+  const uintptr_t begin = reinterpret_cast<uintptr_t>(base) & ~uintptr_t(page_bytes - 1);
+  const uintptr_t end = reinterpret_cast<uintptr_t>(base) + length;
+  const size_t pages = (end - begin + page_bytes - 1) / page_bytes;
+  auto* shadow = new ShadowTable;
+  shadow->begin = begin;
+  shadow->end = begin + pages * page_bytes;
+  shadow->codes = std::make_unique<std::atomic<uint8_t>[]>(pages);
+  // Unmapped holes read as no access, exactly like a failed maps lookup.
+  for (size_t i = 0; i < pages; ++i) {
+    shadow->codes[i].store(0, std::memory_order_relaxed);
+  }
+  std::ifstream maps("/proc/self/maps");
+  std::string line;
+  while (std::getline(maps, line)) {
+    LinuxMapEntry e;
+    if (!ParseProcMapsLine(line, e) || e.end <= begin || e.start >= end) {
+      continue;
+    }
+    const uintptr_t s = std::max<uintptr_t>(e.start, begin);
+    const uintptr_t t = std::min<uintptr_t>(e.end, end);
+    const uint8_t code = ShadowCode(PermsToPageAccess(e.perms));
+    for (uintptr_t a = s; a < t; a += page_bytes) {
+      shadow->codes[(a - begin) / page_bytes].store(code, std::memory_order_relaxed);
+    }
+  }
+  g_shadow.store(shadow, std::memory_order_release);
+#else
+  static_cast<void>(base);
+  static_cast<void>(length);
+#endif
 }
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
@@ -349,6 +539,10 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 #else
   access_out = PageAccess::kNoAccess;
   length = 0;
+
+  if (ShadowQuery(base_address, access_out, length)) {
+    return true;
+  }
 
   LinuxMapEntry e;
   if (!FindEntryForAddress(base_address, e)) {
@@ -447,8 +641,19 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
   }
 
   uint32_t prot = ToPosixProtectFlags(access);
+#if REX_PLATFORM_LINUX
+  const uint8_t code = ShadowCode(access);
+  if (base_address) {
+    ShadowBeginChange(base_address, length, code);
+  }
+#endif
   void* result = mmap64(base_address, length, prot, flags, static_cast<int>(handle),
                         static_cast<off_t>(file_offset));
+#if REX_PLATFORM_LINUX
+  if (base_address) {
+    ShadowEndChange(base_address, length, code, result == base_address);
+  }
+#endif
   if (result == MAP_FAILED) {
     return nullptr;
   }
@@ -463,7 +668,11 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
 }
 
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) {
-  return munmap(base_address, length) == 0;
+  const bool ok = munmap(base_address, length) == 0;
+#if REX_PLATFORM_LINUX
+  ShadowStore(base_address, length, ok ? 0 : kShadowUnknown);
+#endif
+  return ok;
 }
 
 }  // namespace memory

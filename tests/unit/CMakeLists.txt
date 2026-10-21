@@ -2,6 +2,7 @@
 
 add_executable(unit_tests
     memory/heap_allocation_test.cpp
+    memory/protection_shadow_test.cpp
     kernel/object_table_test.cpp
     core/cvar_test.cpp
     core/fiber_test.cpp
