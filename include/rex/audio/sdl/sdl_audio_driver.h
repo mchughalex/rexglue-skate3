@@ -11,11 +11,13 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <queue>
 #include <stack>
+#include <thread>
 
 #include <rex/audio/audio_driver.h>
 #include <rex/thread.h>
@@ -45,6 +47,23 @@ class SDLAudioDriver : public AudioDriver {
   // as video playback). Called only from the SDL audio thread. Returns the
   // number of credits actually released to the guest.
   uint64_t ReleasePacedCredits(uint32_t new_credits);
+
+  // Steady credit release (cvar audio_steady_credit_release). Frames the
+  // device consumed are owed back to the guest as credits; instead of handing
+  // them over in one burst per device callback, a pacer thread releases one
+  // per guest frame period (256 samples = 5.33 ms), the cadence of the real
+  // hardware's audio interrupt.
+  void SteadyPacerThreadMain();
+  void StartSteadyPacer();
+  void StopSteadyPacer();
+  uint64_t TakeSteadyCredits(uint64_t max_credits);
+
+  std::atomic<uint64_t> steady_pending_{0};
+  std::atomic<uint32_t> stats_steady_emergency_{0};
+  std::thread steady_thread_;
+  std::mutex steady_mutex_;
+  std::condition_variable steady_cv_;
+  bool steady_running_ = false;
 
   rex::thread::Semaphore* semaphore_ = nullptr;
 
