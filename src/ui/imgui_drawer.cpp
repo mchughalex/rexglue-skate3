@@ -387,7 +387,13 @@ void ImGuiDrawer::SetupFonts() {
     // DirectWrite white-on-black edge
     // profiles (identity was measurably thinner/dimmer). The *_on_light_
     // variants below keep gamma 1.0 - dark-on-light needs no correction.
-    config.RasterizerGamma = 0.62f;
+    // NOTE(hermes build): the released build linked an imgui that carried a
+    // custom coverage-curve field, ImFontConfig::RasterizerGamma. That pinned
+    // revision no longer exists upstream (the SDK points at a branch that was
+    // deleted), so the white-on-black gamma correction is dropped here and
+    // imgui's default (1.0, identity) is used. Text on the dark overlay theme
+    // therefore renders slightly thinner than in released builds. Nothing else
+    // in this file depended on the field.
     config.FontLoaderFlags = ImGuiFreeTypeBuilderFlags_NoHinting;
     ui_font_ = io.Fonts->AddFontFromMemoryCompressedBase85TTF(
         GetInterRegularCompressedBase85(), 18.0f, &config);
@@ -408,7 +414,8 @@ void ImGuiDrawer::SetupFonts() {
     config_on_light.RasterizerMultiply = 1.0f;
     // Dark-on-light matches the browser with NO coverage curve (harness fit:
     // identity beat every contrast/gamma variant once bake==draw size).
-    config_on_light.RasterizerGamma = 1.0f;
+    // The on-light path asked for RasterizerGamma = 1.0, which is imgui's
+    // default coverage curve, so no assignment is needed for this build.
     ui_font_on_light_ = io.Fonts->AddFontFromMemoryCompressedBase85TTF(
         GetInterRegularCompressedBase85(), 18.0f, &config_on_light);
     ui_font_semibold_on_light_ = io.Fonts->AddFontFromMemoryCompressedBase85TTF(

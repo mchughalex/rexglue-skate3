@@ -101,6 +101,15 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
 bool Protect(void* base_address, size_t length, PageAccess access,
              PageAccess* out_old_access = nullptr);
 
+// Linux: keep an in-process record of the host page protection of
+// [base, base + length), seeded once from /proc/self/maps and updated by every
+// Protect/AllocFixed/DeallocFixed/MapFileView/UnmapFileView call in that range,
+// so QueryProtect answers from memory instead of re-parsing /proc/self/maps.
+// Intended for the guest mapping (the MMIO/watch fault path queries it on
+// every guest-memory fault). A new registration replaces the previous one.
+// No-op on other platforms.
+void RegisterProtectionShadow(void* base, size_t length);
+
 // Queries a region of pages to get the access rights. This will modify the
 // length parameter to the length of pages with the same consecutive access
 // rights. The length will start from the first byte of the first page of

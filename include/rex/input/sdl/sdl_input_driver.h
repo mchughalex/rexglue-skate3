@@ -82,6 +82,16 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   void OnControllerDeviceAxisMotionLocked(const SDL_Event& event);
   void OnControllerDeviceButtonChangedLocked(const SDL_Event& event);
 
+  // Adopt every gamepad SDL already knows about, so controllers present before
+  // the gamepad subsystem came up are registered even if SDL never emitted
+  // SDL_EVENT_GAMEPAD_ADDED for them.
+  void AdoptPresentControllers();
+  // Throttled AdoptPresentControllers for the periodic update path.
+  void MaybeAdoptPresentControllers();
+  // Log how many gamepads and joysticks SDL can actually see, so a silent
+  // "no controller" report has a diagnostic in the log.
+  void LogDeviceInventory() const;
+
   inline uint64_t AnalogToKeyfield(const X_INPUT_GAMEPAD& gamepad) const;
   std::optional<size_t> GetControllerIndexFromInstanceID(SDL_JoystickID instance_id);
   ControllerState* GetControllerState(uint32_t user_index);
@@ -99,6 +109,8 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   std::mutex event_queue_mutex_;
   std::vector<SDL_Event> pending_events_;
   std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
+  // Host uptime (ms) of the last periodic controller re-adoption sweep.
+  uint64_t last_adopt_ms_ = 0;
 };
 
 }  // namespace rex::input::sdl

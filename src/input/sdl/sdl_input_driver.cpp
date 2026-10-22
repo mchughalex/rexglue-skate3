@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <filesystem>
 
 #include <rex/assert.h>
@@ -92,7 +93,10 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
 
       // Initialize game controller subsystem
       if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
-        REXLOG_ERROR("SDL: Failed to init gamecontroller subsystem: {}", SDL_GetError());
+        REXLOG_ERROR(
+            "SDL: Failed to init gamepad subsystem: {}. Controller input will be "
+            "unavailable for this session (keyboard/mouse may still work).",
+            SDL_GetError());
         return;
       }
       SDL_Gamepad_initialized_ = true;
@@ -119,6 +123,13 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
           }
         }
       }
+      // Adopt whatever is already attached. SDL surfaces devices through
+      // SDL_EVENT_GAMEPAD_ADDED only, so a controller that was present before
+      // this subsystem came up, or a backend that never emits that event, would
+      // otherwise stay invisible for the whole session.
+      LogDeviceInventory();
+      AdoptPresentControllers();
+
       REXLOG_INFO("SDL input driver initialized successfully");
     });
   }
@@ -474,6 +485,19 @@ void SDLInputDriver::StopRumbleLocked(ControllerState& state) {
 }
 
 void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
+  // The same physical device can be announced twice: the startup enumeration
+  // sweep adopts whatever SDL already reports, and SDL's queued
+  // SDL_EVENT_GAMEPAD_ADDED for that same instance is drained afterwards.
+  // Without this guard the one pad ends up occupying two player slots, which
+  // reads to the game as a second controller being connected. Skip devices we
+  // already track, and do it before opening a handle so nothing is leaked.
+  if (auto existing = GetControllerIndexFromInstanceID(event.cdevice.which)) {
+    REXLOG_INFO(
+        "SDL OnControllerDeviceAdded: instance {} is already tracked at player index "
+        "{}, ignoring duplicate announcement.",
+        static_cast<int>(event.cdevice.which), *existing);
+    return;
+  }
   // Open the controller.
   const auto controller = SDL_OpenGamepad(event.cdevice.which);
   if (!controller) {
@@ -710,6 +734,11 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
 }
 
 void SDLInputDriver::QueueControllerUpdate() {
+  // A controller connected after startup, or an SDL_EVENT_GAMEPAD_ADDED that
+  // never arrived, would otherwise leave every slot empty for the whole
+  // session. Sweep at most once per second, and only while a slot is free.
+  MaybeAdoptPresentControllers();
+
   // Pump SDL events to ensure controller state is up to date.
   bool is_queued = false;
   sdl_pumpevents_queued_.compare_exchange_strong(is_queued, true);
@@ -718,6 +747,92 @@ void SDLInputDriver::QueueControllerUpdate() {
       SDL_PumpEvents();
       sdl_pumpevents_queued_ = false;
     });
+  }
+}
+
+void SDLInputDriver::AdoptPresentControllers() {
+  if (!SDL_Gamepad_initialized_) {
+    return;
+  }
+  int gamepad_count = 0;
+  SDL_JoystickID* gamepads = SDL_GetGamepads(&gamepad_count);
+  std::vector<SDL_JoystickID> present;
+  if (gamepads) {
+    present.reserve(static_cast<size_t>(gamepad_count));
+    for (int i = 0; i < gamepad_count; i++) {
+      present.push_back(gamepads[i]);
+    }
+    SDL_free(gamepads);
+  }
+  if (present.empty()) {
+    return;
+  }
+  for (SDL_JoystickID instance_id : present) {
+    std::lock_guard<std::mutex> guard(controllers_mutex_);
+    if (GetControllerIndexFromInstanceID(instance_id)) {
+      continue;  // Already tracked.
+    }
+    // Route through the added-device path so slot picking, player index and
+    // capability reporting stay identical to the event-driven path.
+    SDL_Event synthetic{};
+    synthetic.type = SDL_EVENT_GAMEPAD_ADDED;
+    synthetic.cdevice.which = instance_id;
+    OnControllerDeviceAddedLocked(synthetic);
+  }
+}
+
+void SDLInputDriver::MaybeAdoptPresentControllers() {
+  if (!SDL_Gamepad_initialized_) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> guard(controllers_mutex_);
+    bool has_free_slot = false;
+    for (const auto& controller : controllers_) {
+      if (!controller.sdl) {
+        has_free_slot = true;
+        break;
+      }
+    }
+    if (!has_free_slot) {
+      return;
+    }
+  }
+  const uint64_t now_ms =
+      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
+  if (last_adopt_ms_ != 0 && now_ms - last_adopt_ms_ < 1000) {
+    return;
+  }
+  last_adopt_ms_ = now_ms;
+  AdoptPresentControllers();
+}
+
+void SDLInputDriver::LogDeviceInventory() const {
+  int gamepad_count = 0;
+  int joystick_count = 0;
+  SDL_JoystickID* gamepads = SDL_GetGamepads(&gamepad_count);
+  if (gamepads) {
+    SDL_free(gamepads);
+  }
+  SDL_JoystickID* joysticks = SDL_GetJoysticks(&joystick_count);
+  if (joysticks) {
+    SDL_free(joysticks);
+  }
+  REXLOG_INFO("SDL HID inventory: {} gamepad(s) and {} joystick(s) visible to SDL.", gamepad_count,
+              joystick_count);
+  if (gamepad_count == 0 && joystick_count > 0) {
+    REXLOG_WARN(
+        "SDL HID: {} joystick(s) are visible but none is recognized as a gamepad, "
+        "so controller input cannot be delivered. Supply mappings through the "
+        "hid_mappings_file cvar (gamecontrollerdb.txt).",
+        joystick_count);
+  } else if (gamepad_count == 0) {
+    REXLOG_WARN(
+        "SDL HID: no gamepad and no joystick is visible to SDL. On Linux this "
+        "usually means the SDL build in use cannot enumerate the device (no udev "
+        "backend), or this user cannot read the input device nodes.");
   }
 }
 

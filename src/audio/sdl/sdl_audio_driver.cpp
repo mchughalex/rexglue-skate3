@@ -24,6 +24,13 @@
 #include <rex/logging.h>
 #include <rex/perf/counter.h>
 #include <SDL3/SDL.h>
+#include <rex/platform.h>
+
+#include <algorithm>
+#include <chrono>
+#if REX_PLATFORM_LINUX
+#include <pthread.h>
+#endif
 
 REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
 
@@ -40,6 +47,16 @@ REXCVAR_DEFINE_BOOL(audio_stats, false, "Audio",
                     "frames consumed vs real time, silence insertions (underruns), queue "
                     "depth and pacing state. Turn on when diagnosing robotic/slowed/"
                     "crackling audio reports.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(audio_steady_credit_release, true, "Audio",
+                    "Hand frames back to the guest's audio engine at a steady one-per-5.33ms "
+                    "cadence, like the console's audio hardware, instead of in one burst per "
+                    "device callback. With a large device buffer (PipeWire quantum 1024+, "
+                    "Bluetooth, HDMI) the burst made the game mix several frames back to back, "
+                    "and its streamed music could not refill in time: the music skipped and "
+                    "drifted off-tempo whenever sound effects played. Falls back to a burst "
+                    "only when the device asks for more than is queued.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_INT32(audio_device_sample_frames, 0, "Audio",
@@ -64,6 +81,7 @@ SDLAudioDriver::SDLAudioDriver(memory::Memory* memory, rex::thread::Semaphore* s
     : AudioDriver(memory), semaphore_(semaphore) {}
 
 SDLAudioDriver::~SDLAudioDriver() {
+  StopSteadyPacer();
   assert_true(frames_queued_.empty());
   assert_true(frames_unused_.empty());
 }
@@ -132,6 +150,8 @@ bool SDLAudioDriver::Initialize() {
     }
   }
 
+  StartSteadyPacer();
+
   if (!SDL_ResumeAudioDevice(sdl_device)) {
     REXAPU_ERROR("SDL_ResumeAudioDevice() failed: {}", SDL_GetError());
     return false;
@@ -185,6 +205,7 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
 }
 
 void SDLAudioDriver::Shutdown() {
+  StopSteadyPacer();
   if (sdl_stream_) {
     SDL_DestroyAudioStream(sdl_stream_);
     sdl_stream_ = nullptr;
@@ -251,13 +272,30 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
   int64_t wait_budget_ns =
       std::min<int64_t>(15000000, request_chunks * int64_t(channel_samples_) * 1000000000ll /
                                       int64_t(frame_frequency_) / 2);
+  const bool steady = REXCVAR_GET(audio_steady_credit_release);
   // Grant credits deferred by the real-time pacer once enough time has passed.
-  uint64_t credits_released = driver->ReleasePacedCredits(0);
+  // In steady mode the pacer thread owns the release; nothing happens here
+  // unless the queue runs dry (see below).
+  uint64_t credits_released = steady ? 0 : driver->ReleasePacedCredits(0);
   while (additional_amount > 0) {
     static uint32_t sdl_callback_count = 0;
     float* buffer = nullptr;
     {
       std::unique_lock<std::mutex> guard(driver->frames_mutex_);
+      if (driver->frames_queued_.empty() && steady) {
+        // The device wants more than is queued: its buffer is larger than
+        // the guest's credit pool, or the guest stalled. Hand over everything
+        // still owed at once and wait for it, as the burst path always did.
+        const uint64_t owed = driver->TakeSteadyCredits(UINT64_MAX);
+        if (owed) {
+          if (driver->semaphore_->Release(int(owed), nullptr)) {
+            credits_released += owed;
+            driver->stats_steady_emergency_.fetch_add(1, std::memory_order_relaxed);
+          } else {
+            driver->steady_pending_.fetch_add(owed, std::memory_order_relaxed);
+          }
+        }
+      }
       if (driver->frames_queued_.empty() && credits_released && wait_budget_ns > 0) {
         const auto wait_start = std::chrono::steady_clock::now();
         driver->frames_available_cv_.wait_for(guard, std::chrono::nanoseconds(wait_budget_ns),
@@ -313,7 +351,11 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
         break;
       }
 
-      credits_released += driver->ReleasePacedCredits(1);
+      if (steady) {
+        driver->steady_pending_.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        credits_released += driver->ReleasePacedCredits(1);
+      }
       if (stats_enabled) {
         driver->stats_frames_++;
       }
@@ -329,13 +371,15 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
       REXAPU_INFO(
           "Audio stats ({:.1f}s): callbacks={} frames={} ({:.1f}/s, real-time={:.1f}/s) "
           "silence_chunks={} queue_depth={}..{} deferred_credits={} allowance={:.1f} "
-          "max_callback_gap={}ms",
+          "max_callback_gap={}ms steady={} steady_pending={} steady_bursts={}",
           window_s, driver->stats_callbacks_, driver->stats_frames_,
           double(driver->stats_frames_) / window_s,
           double(frame_frequency_) / double(channel_samples_), driver->stats_silence_chunks_,
           driver->stats_queue_min_ == SIZE_MAX ? 0 : driver->stats_queue_min_,
-          driver->stats_queue_max_, driver->pace_deferred_credits_,
-          driver->pace_allowance_frames_, driver->stats_max_callback_gap_ns_ / 1000000ull);
+          driver->stats_queue_max_, driver->pace_deferred_credits_, driver->pace_allowance_frames_,
+          driver->stats_max_callback_gap_ns_ / 1000000ull, steady,
+          driver->steady_pending_.load(std::memory_order_relaxed),
+          driver->stats_steady_emergency_.exchange(0, std::memory_order_relaxed));
       driver->stats_window_start_ns_ = now_ns;
       driver->stats_callbacks_ = 0;
       driver->stats_frames_ = 0;
@@ -395,6 +439,90 @@ uint64_t SDLAudioDriver::ReleasePacedCredits(uint32_t new_credits) {
     }
   }
   return releasable;
+}
+
+uint64_t SDLAudioDriver::TakeSteadyCredits(uint64_t max_credits) {
+  uint64_t cur = steady_pending_.load(std::memory_order_relaxed);
+  uint64_t take = 0;
+  do {
+    take = std::min(cur, max_credits);
+    if (!take) {
+      return 0;
+    }
+  } while (!steady_pending_.compare_exchange_weak(cur, cur - take, std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed));
+  return take;
+}
+
+void SDLAudioDriver::StartSteadyPacer() {
+  std::lock_guard<std::mutex> lock(steady_mutex_);
+  if (steady_running_) {
+    return;
+  }
+  steady_running_ = true;
+  steady_thread_ = std::thread([this] { SteadyPacerThreadMain(); });
+}
+
+void SDLAudioDriver::StopSteadyPacer() {
+  {
+    std::lock_guard<std::mutex> lock(steady_mutex_);
+    steady_running_ = false;
+  }
+  steady_cv_.notify_all();
+  if (steady_thread_.joinable()) {
+    steady_thread_.join();
+  }
+}
+
+void SDLAudioDriver::SteadyPacerThreadMain() {
+#if REX_PLATFORM_LINUX
+  pthread_setname_np(pthread_self(), "Audio Pacer");
+#endif
+  using clock = std::chrono::steady_clock;
+  // One guest frame period, 0.5% short: the pacer can never release more than
+  // the device consumed (it only hands back owed credits), so running a hair
+  // fast only guarantees it cannot fall behind a device clock that runs fast.
+  const auto period = std::chrono::nanoseconds(
+      int64_t(1e9 * double(channel_samples_) / double(frame_frequency_) * 0.995));
+  // Bounds the catch-up after this thread was delayed, so a late wake-up
+  // cannot turn back into the burst this pacer exists to remove.
+  constexpr int64_t kMaxCreditsPerWake = 4;
+  constexpr int64_t kResyncAfterPeriods = 20;
+
+  auto next = clock::now() + period;
+  std::unique_lock<std::mutex> lock(steady_mutex_);
+  while (steady_running_) {
+    steady_cv_.wait_until(lock, next, [this] { return !steady_running_; });
+    if (!steady_running_) {
+      break;
+    }
+    const auto now = clock::now();
+    if (!REXCVAR_GET(audio_steady_credit_release)) {
+      // Switched off at runtime: return anything still owed so the guest is
+      // not left short, then idle.
+      if (const uint64_t owed = TakeSteadyCredits(UINT64_MAX)) {
+        if (!semaphore_->Release(int(owed), nullptr)) {
+          steady_pending_.fetch_add(owed, std::memory_order_relaxed);
+        }
+      }
+      next = now + period;
+      continue;
+    }
+    int64_t due = 1;
+    if (now > next) {
+      due += (now - next) / period;
+    }
+    if (due > kResyncAfterPeriods) {
+      next = now;
+      due = 1;
+    }
+    if (const uint64_t take = TakeSteadyCredits(uint64_t(std::min(due, kMaxCreditsPerWake)))) {
+      if (!semaphore_->Release(int(take), nullptr)) {
+        steady_pending_.fetch_add(take, std::memory_order_relaxed);
+      }
+    }
+    next += period * due;
+  }
 }
 
 }  // namespace rex::audio::sdl

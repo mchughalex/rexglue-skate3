@@ -154,6 +154,12 @@ Memory::~Memory() {
   physical_membase_ = nullptr;
 }
 
+namespace {
+
+constexpr size_t kGuestMappingLength = 0x120000000ull;
+
+}  // namespace
+
 bool Memory::Initialize() {
   file_name_ = fmt::format("xenia_memory_{}", chrono::Clock::QueryHostTickCount());
 
@@ -193,6 +199,9 @@ bool Memory::Initialize() {
     return false;
   }
   virtual_membase_ = mapping_base_;
+  // Every guest-memory fault re-checks host page protection (MMIO handler);
+  // keep that an in-memory lookup instead of a /proc/self/maps parse.
+  rex::memory::RegisterProtectionShadow(mapping_base_, kGuestMappingLength);
   physical_membase_ = mapping_base_ + 0x100000000ull;
   // Prepare virtual heaps.
   heaps_.v00000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestVirtual, 0x00000000,
@@ -341,12 +350,6 @@ static const struct {
         0x0000000100000000ull,
     },
 };
-
-namespace {
-
-constexpr size_t kGuestMappingLength = 0x120000000ull;
-
-}  // namespace
 
 int Memory::MapViews(uint8_t* mapping_base) {
   assert_true(rex::countof(map_info) == rex::countof(views_.all_views));

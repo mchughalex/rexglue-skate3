@@ -393,9 +393,14 @@ class PosixConditionBase {
       if (timeout == std::chrono::milliseconds::max()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       } else {
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
-        std::this_thread::sleep_for(sleep_time);
+        // Sleep for the actual remaining time. Truncating it to whole
+        // milliseconds made it 0 for any wait shorter than 2 ms, so the 1 ms
+        // poll slices of alertable waits spun for their entire length and the
+        // waiting thread (the audio worker, guest threads in alertable
+        // multi-object waits) used a full CPU core while idle.
+        const std::chrono::steady_clock::duration remaining = end_time - now;
+        std::this_thread::sleep_for(
+            std::min<std::chrono::steady_clock::duration>(remaining, std::chrono::milliseconds(1)));
       }
     }
   }

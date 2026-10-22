@@ -1004,6 +1004,13 @@ class Presenter {
   // connection as the next successful reconnection should be followed by a
   // repaint request anyway.
   std::atomic<bool> ui_thread_paint_requested_{false};
+  // Steady clock milliseconds (never 0 once set) when the pending window paint
+  // request was issued, for re-issuing requests that the window system has
+  // dropped (otherwise ui_thread_paint_requested_ would stay set forever and
+  // swallow every later request, freezing the picture).
+  std::atomic<uint64_t> ui_thread_paint_request_time_ms_{0};
+  // Re-issues during the current stall, for logging.
+  std::atomic<uint32_t> ui_thread_paint_request_reissues_{0};
 
   std::mutex guest_output_paint_config_mutex_;
   // UI thread: writable, guest output thread: read-only.

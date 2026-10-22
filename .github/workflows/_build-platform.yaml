@@ -62,7 +62,8 @@ jobs:
           sudo apt update
           sudo apt install -y cmake ninja-build build-essential git curl unzip autoconf python3.12-venv \
             libgtk-3-dev libx11-xcb-dev wine vulkan-sdk \
-            libasound2-dev libpulse-dev libpipewire-0.3-dev
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libudev-dev libusb-1.0-0-dev
 
       - name: Install build deps (linux-arm64)
         if: inputs.platform == 'linux-arm64'
@@ -70,7 +71,8 @@ jobs:
           sudo apt update
           sudo apt install -y cmake ninja-build build-essential git curl unzip autoconf python3.12-venv \
             libgtk-3-dev libx11-xcb-dev libvulkan-dev glslc glslang-tools \
-            libasound2-dev libpulse-dev libpipewire-0.3-dev
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libudev-dev libusb-1.0-0-dev
 
       - name: Set up sccache
         uses: hendrikmuhs/ccache-action@v1.2.22

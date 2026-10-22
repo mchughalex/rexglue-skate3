@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -76,6 +77,24 @@ class GTKWindow : public Window {
   static gboolean DrawingAreaEventHandlerThunk(GtkWidget* widget, GdkEvent* event,
                                                gpointer user_data);
   static gboolean DrawHandler(GtkWidget* widget, cairo_t* cr, gpointer data);
+
+  // Paint requests arrive from any thread: the presenter asks for a paint from
+  // the guest output thread for every guest frame whenever presentation goes
+  // through the UI thread (always the case with a FIFO swapchain). GTK is not
+  // thread-safe, and a gtk_widget_queue_draw-driven "draw" depends on the GDK
+  // frame clock, which can stay frozen when the compositor doesn't acknowledge
+  // a frame. Either way a request could be lost, and the presenter then never
+  // asks again, freezing the picture while the game keeps running. So
+  // requests are marshalled to the main loop with g_idle_add (thread-safe) and
+  // painted directly, without the frame clock.
+  struct PaintRequestState {
+    std::atomic<bool> pending{false};
+    // UI thread only. Null once the window has been destroyed.
+    GTKWindow* window = nullptr;
+  };
+  static gboolean PaintRequestIdleCallback(gpointer user_data);
+  static void PaintRequestIdleDestroy(gpointer user_data);
+  std::shared_ptr<PaintRequestState> paint_request_state_;
 
   // Non-owning (initially floating) references to the widgets.
   GtkWidget* window_ = nullptr;
