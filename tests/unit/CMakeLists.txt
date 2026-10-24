@@ -55,6 +55,14 @@ if(UNIX AND NOT APPLE)
 endif()
 
 # Discover tests
+add_executable(vulkan_pipeline_cache_header_test graphics/pipeline_cache_header_test.cpp)
+target_include_directories(vulkan_pipeline_cache_header_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+add_test(NAME unit.vulkan_pipeline_cache_header COMMAND vulkan_pipeline_cache_header_test)
+
+add_executable(vulkan_pipeline_cache_file_test graphics/pipeline_cache_file_test.cpp)
+target_include_directories(vulkan_pipeline_cache_file_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+add_test(NAME unit.vulkan_pipeline_cache_file COMMAND vulkan_pipeline_cache_file_test)
+
 include(Catch)
 catch_discover_tests(unit_tests
     TEST_PREFIX "unit."

@@ -11,6 +11,7 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdio>
@@ -444,6 +445,20 @@ class VulkanPipelineCache {
   FILE* pipeline_storage_file_ = nullptr;
   bool pipeline_storage_file_flush_needed_ = false;
 
+  // Driver-compiled shader data is separate from the portable .xsh/.xpso
+  // descriptions. Keep this handle alive until all creation/writer threads
+  // join; the driver provides synchronization for concurrent cache access.
+  void InitializeDriverPipelineCache();
+  void SaveDriverPipelineCache();
+  void DisableDriverPipelineCachePersistence(const char* reason);
+  VkPipelineCache driver_pipeline_cache_ = VK_NULL_HANDLE;
+  std::filesystem::path driver_pipeline_cache_path_;
+  std::atomic<bool> driver_pipeline_cache_dirty_{false};
+  std::atomic<bool> driver_pipeline_cache_persistence_disabled_{false};
+  uint64_t driver_pipeline_cache_saved_hash_ = 0;
+  bool driver_pipeline_cache_has_saved_hash_ = false;
+  std::chrono::steady_clock::time_point driver_pipeline_cache_saved_at_{};
+
   // Thread for asynchronous writing to the storage streams.
   void StorageWriteThread();
   std::mutex storage_write_request_lock_;
@@ -454,6 +469,7 @@ class VulkanPipelineCache {
   std::deque<PipelineStoredDescription> storage_write_pipeline_queue_;
   bool storage_write_flush_shaders_ = false;
   bool storage_write_flush_pipelines_ = false;
+  bool storage_write_flush_driver_cache_ = false;
   bool storage_write_thread_shutdown_ = false;
   std::unique_ptr<rex::thread::Thread> storage_write_thread_;
 
