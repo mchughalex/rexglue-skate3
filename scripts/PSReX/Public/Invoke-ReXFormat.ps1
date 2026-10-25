@@ -45,7 +45,8 @@ function Invoke-ReXFormat {
     }
 
     if ($files.Count -gt 0) {
-        $files | ForEach-Object { clang-format -i $_ }
+        $clangFormat = Get-ReXClangFormat
+        $files | ForEach-Object { & $clangFormat -i $_ }
         Write-Host "  Formatted $($files.Count) files"
     } else {
         Write-Host "  No files found"

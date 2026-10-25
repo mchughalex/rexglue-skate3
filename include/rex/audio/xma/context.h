@@ -63,10 +63,14 @@ struct XMA_CONTEXT_DATA {
   uint32_t input_buffer_1_packet_count : 12;  // XMASetInputBuffer1, number of
                                               // 2KB packets. Max 4095 packets.
                                               // These packets form a block.
-  uint32_t loop_subframe_start : 2;           // +12bit, XMASetLoopData
-  uint32_t loop_subframe_end : 3;             // +14bit, XMASetLoopData
-  uint32_t loop_subframe_skip : 3;            // +17bit, XMASetLoopData might be
-                                              // subframe_decode_count
+  uint32_t loop_subframe_end : 2;             // +12bit, XMAPlaybackSetLoop
+                                              // dwLoopSubframeEnd: last loop frame
+                                              // plays subframes 0..end
+  uint32_t unk_dword_1_a : 3;                 // +14bit
+  uint32_t loop_subframe_skip : 3;            // +17bit, XMAPlaybackSetLoop
+                                              // dwLoopSubframeSkip: subframes to
+                                              // discard at loop start; 4 = whole
+                                              // warm-up frame (frame-aligned loops)
   uint32_t subframe_decode_count : 4;         // +20bit
   uint32_t output_buffer_padding : 3;         // +24bit, extra output buffer blocks
                                               // reserved per decoded frame
@@ -194,6 +198,16 @@ class XmaContext {
   static const uint32_t kOutputMaxSizeBytes = 31 * kOutputBytesPerBlock;
   static const uint32_t kMaxFrameSizeinBits = 0x4000 - kBitsPerPacketHeader;
 
+  // The bitstream declares a start padding that the hardware discards. FFmpeg's
+  // xmaframes decoder parses that field and drops it on the floor
+  // (wmaprodec.c decode_frame, "start skip"), emitting the padding as ordinary
+  // output, so its sample numbering runs this far ahead of the numbering the
+  // guest's loop offsets use. Measured at 192 on every wave checked. Left
+  // uncorrected it costs each loop wrap its final 192 samples.
+  static const uint32_t kDecoderStartPadding = 192;
+  static_assert(kDecoderStartPadding < kSamplesPerFrame,
+                "start padding must fit inside one decoded frame");
+
   explicit XmaContext();
   ~XmaContext();
 
@@ -254,6 +268,7 @@ class XmaContext {
   void Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data);
   void UpdateLoopStatus(XMA_CONTEXT_DATA* data);
   void ClearLocked(XMA_CONTEXT_DATA* data);
+  void ResetDecoderState();
 
   memory::RingBuffer PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data);
   int PrepareDecoder(int sample_rate, bool is_two_channel);
@@ -299,6 +314,10 @@ class XmaContext {
   std::array<uint8_t, 1 + 4096> xma_frame_;
   // Conversion buffer for up to 2-channel frame
   std::array<uint8_t, kBytesPerFrameChannel * 2> raw_frame_;
+  // Freshly decoded block, before start-padding realignment
+  std::array<uint8_t, kBytesPerFrameChannel * 2> decoded_frame_;
+  // Tail of the previous decoded block, awaiting the next block's padding head
+  std::array<uint8_t, kBytesPerFrameChannel * 2> carry_frame_;
 
   // Output buffer tracking
   int32_t remaining_subframe_blocks_in_output_buffer_ = 0;
@@ -314,6 +333,13 @@ class XmaContext {
   uint32_t old_split_frame_len_ = 0;
   uint32_t old_split_frame_len_partial_ = 0;
   uint8_t old_split_frame_padding_start_ = 0;
+
+  // Start-padding realignment state. Attributes belong to the frame whose
+  // samples are still being assembled, so they land one decode after the frame
+  // they describe.
+  bool carry_valid_ = false;
+  uint8_t pending_output_limit_ = 0;
+  uint8_t pending_start_skip_ = 0;
 };
 
 }  // namespace rex::audio

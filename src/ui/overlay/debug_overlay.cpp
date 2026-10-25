@@ -210,7 +210,7 @@ void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
   ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - text_size.x - padding) * 0.5f,
                                  io.DisplaySize.y - text_size.y - bottom_offset));
   ImGui::SetNextWindowSize(ImVec2(0, 0));
-  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.5f));
+  ImGui::PushStyleColor(ImGuiCol_Text, imgui_drawer()->style().debug.muted_text);
   if (ImGui::Begin("##watermark", nullptr,
                        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
                        ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |

@@ -68,6 +68,11 @@ void mergeAndSeal(CodegenContext& ctx) {
       break;
   }
 
+  size_t sharedRegs = graph.markFuncletRegisterSharing();
+  if (sharedRegs > 0) {
+    REXCODEGEN_DEBUG("Analyze: {} functions share registers with an SEH funclet", sharedRegs);
+  }
+
   size_t totalSealed = graph.sealAllReady();
   size_t stillPending = graph.pendingCount();
 

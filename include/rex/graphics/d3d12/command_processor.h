@@ -63,12 +63,6 @@ class D3D12CommandProcessor : public CommandProcessor {
   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                bool blocking) override;
 
-  void RequestFrameTrace(const std::filesystem::path& root_path) override;
-
-  void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) override;
-
-  void RestoreEdramSnapshot(const void* snapshot) override;
-
   ui::d3d12::D3D12Provider& GetD3D12Provider() const {
     return *static_cast<ui::d3d12::D3D12Provider*>(graphics_system_->provider());
   }
@@ -233,8 +227,6 @@ class D3D12CommandProcessor : public CommandProcessor {
   bool IssueDraw(xenos::PrimitiveType primitive_type, uint32_t index_count,
                  IndexBufferInfo* index_buffer_info, bool major_mode_explicit) override;
   bool IssueCopy() override;
-
-  void InitializeTrace() override;
 
  private:
   static constexpr uint32_t kQueueFrames = 3;
@@ -734,9 +726,6 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   D3D12_INDEX_BUFFER_VIEW current_index_buffer_view_ = {};
   bool current_index_buffer_view_valid_ = false;
-
-  std::atomic<bool> pix_capture_requested_ = false;
-  bool pix_capturing_;
 
   // The current fixed-function drawing state.
   D3D12_VIEWPORT ff_viewport_;

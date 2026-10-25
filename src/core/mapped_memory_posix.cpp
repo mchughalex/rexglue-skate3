@@ -6,7 +6,7 @@
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  *
- * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ * @modified    Tom Clay & Rien Gupta, 2026 - Adapted for ReXGlue runtime (POSIX + macOS)
  */
 
 #include <memory>
@@ -20,11 +20,19 @@
 #include <rex/memory/mapped_memory.h>
 #include <rex/platform.h>
 
-#if REX_PLATFORM_MAC
-using off64_t = off_t;
-#define stat64 stat
-#define fstat64 fstat
-#define ftruncate64 ftruncate
+// macOS off_t is 64-bit and provides no *64 large-file variants; the base
+// names already are the large-file interfaces. Linux still ships legacy 32-bit
+// off_t on some distributions, so keep the explicit *64 forms there.
+#if defined(__APPLE__)
+using rex_stat64_t = struct stat;
+using rex_off64_t = off_t;
+#define rex_fstat64 fstat
+#define rex_ftruncate64 ftruncate
+#else
+using rex_stat64_t = struct stat64;
+using rex_off64_t = off64_t;
+#define rex_fstat64 fstat64
+#define rex_ftruncate64 ftruncate64
 #endif
 
 namespace rex::memory {
@@ -58,8 +66,8 @@ class PosixMappedMemory : public MappedMemory {
 
     size_t map_length = length;
     if (!length) {
-      struct stat64 file_stat;
-      if (fstat64(file_descriptor, &file_stat)) {
+      rex_stat64_t file_stat;
+      if (rex_fstat64(file_descriptor, &file_stat)) {
         close(file_descriptor);
         return nullptr;
       }
@@ -82,7 +90,7 @@ class PosixMappedMemory : public MappedMemory {
     }
     if (file_descriptor_ >= 0) {
       if (truncate_size) {
-        ftruncate64(file_descriptor_, off64_t(truncate_size));
+        rex_ftruncate64(file_descriptor_, rex_off64_t(truncate_size));
       }
       close(file_descriptor_);
       file_descriptor_ = -1;

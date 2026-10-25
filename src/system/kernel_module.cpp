@@ -71,8 +71,8 @@ uint32_t KernelModule::GetProcAddressByOrdinal(uint16_t ordinal, uint32_t caller
     uint32_t thunk_addr = dispatcher->AllocateThunk(func, caller_address);
     if (thunk_addr) {
       thunk_cache_[key] = thunk_addr;
-      REXSYS_INFO("GetProcAddressByOrdinal: {} ({:04X}) in {} -> thunk at {:08X}",
-                  export_entry->name, ordinal, name_, thunk_addr);
+      REXSYS_DEBUG("GetProcAddressByOrdinal: {} ({:04X}) in {} -> thunk at {:08X}",
+                   export_entry->name, ordinal, name_, thunk_addr);
       return thunk_addr;
     }
   }

@@ -28,8 +28,8 @@ REXCVAR_DEFINE_BOOL(d3d12_tiled_shared_memory, true, "GPU/D3D12",
 namespace rex::graphics::d3d12 {
 
 D3D12SharedMemory::D3D12SharedMemory(D3D12CommandProcessor& command_processor,
-                                     memory::Memory& memory, TraceWriter& trace_writer)
-    : SharedMemory(memory), command_processor_(command_processor), trace_writer_(trace_writer) {}
+                                     memory::Memory& memory)
+    : SharedMemory(memory), command_processor_(command_processor) {}
 
 D3D12SharedMemory::~D3D12SharedMemory() {
   Shutdown(true);
@@ -142,8 +142,6 @@ bool D3D12SharedMemory::Initialize() {
 }
 
 void D3D12SharedMemory::Shutdown(bool from_destructor) {
-  ResetTraceDownload();
-
   upload_buffer_pool_.reset();
 
   ui::d3d12::util::ReleaseAndNull(buffer_descriptor_heap_);
@@ -262,68 +260,6 @@ void D3D12SharedMemory::WriteUintPow2UAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE h
       D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 }
 
-bool D3D12SharedMemory::InitializeTraceSubmitDownloads() {
-  ResetTraceDownload();
-  PrepareForTraceDownload();
-  uint32_t download_page_count = trace_download_page_count();
-  if (!download_page_count) {
-    return false;
-  }
-  D3D12_RESOURCE_DESC download_buffer_desc;
-  ui::d3d12::util::FillBufferResourceDesc(
-      download_buffer_desc, download_page_count << page_size_log2(), D3D12_RESOURCE_FLAG_NONE);
-  const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
-  ID3D12Device* device = provider.GetDevice();
-  if (FAILED(device->CreateCommittedResource(&ui::d3d12::util::kHeapPropertiesReadback,
-                                             provider.GetHeapFlagCreateNotZeroed(),
-                                             &download_buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST,
-                                             nullptr, IID_PPV_ARGS(&trace_download_buffer_)))) {
-    REXGPU_ERROR(
-        "Shared memory: Failed to create a {} KB GPU-written memory download "
-        "buffer for frame tracing",
-        download_page_count << page_size_log2() >> 10);
-    ResetTraceDownload();
-    return false;
-  }
-  auto& command_list = command_processor_.GetDeferredCommandList();
-  UseAsCopySource();
-  command_processor_.SubmitBarriers();
-  uint32_t download_buffer_offset = 0;
-  for (const auto& download_range : trace_download_ranges()) {
-    command_list.D3DCopyBufferRegion(trace_download_buffer_, download_buffer_offset, buffer_,
-                                     download_range.first, download_range.second);
-    download_buffer_offset += download_range.second;
-  }
-  return true;
-}
-
-void D3D12SharedMemory::InitializeTraceCompleteDownloads() {
-  if (!trace_download_buffer_) {
-    return;
-  }
-  void* download_mapping;
-  if (SUCCEEDED(trace_download_buffer_->Map(0, nullptr, &download_mapping))) {
-    uint32_t download_buffer_offset = 0;
-    for (const auto& download_range : trace_download_ranges()) {
-      trace_writer_.WriteMemoryRead(
-          download_range.first, download_range.second,
-          reinterpret_cast<const uint8_t*>(download_mapping) + download_buffer_offset);
-    }
-    D3D12_RANGE download_write_range = {};
-    trace_download_buffer_->Unmap(0, &download_write_range);
-  } else {
-    REXGPU_ERROR(
-        "Shared memory: Failed to map the GPU-written memory download buffer "
-        "for frame tracing");
-  }
-  ResetTraceDownload();
-}
-
-void D3D12SharedMemory::ResetTraceDownload() {
-  ui::d3d12::util::ReleaseAndNull(trace_download_buffer_);
-  ReleaseTraceDownloadRanges();
-}
-
 bool D3D12SharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
                                                          uint32_t length_allocations) {
   if (!length_allocations) {
@@ -376,8 +312,6 @@ bool D3D12SharedMemory::UploadRanges(
   for (auto upload_range : upload_page_ranges) {
     uint32_t upload_range_start = upload_range.first;
     uint32_t upload_range_length = upload_range.second;
-    trace_writer_.WriteMemoryRead(upload_range_start << page_size_log2(),
-                                  upload_range_length << page_size_log2());
     while (upload_range_length != 0) {
       ID3D12Resource* upload_buffer;
       size_t upload_buffer_offset, upload_buffer_size;

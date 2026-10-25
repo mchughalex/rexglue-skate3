@@ -1124,44 +1124,6 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
   return true;
 }
 
-RenderTargetCache::RenderTarget*
-RenderTargetCache::PrepareFullEdram1280xRenderTargetForSnapshotRestoration(
-    xenos::ColorRenderTargetFormat color_format) {
-  assert_true(GetPath() == Path::kHostRenderTargets);
-  constexpr uint32_t kPitchTilesAt32bpp = 16;
-  constexpr uint32_t kWidth = kPitchTilesAt32bpp * xenos::kEdramTileWidthSamples;
-  if (kWidth * draw_resolution_scale_x() > GetMaxRenderTargetWidth()) {
-    return nullptr;
-  }
-  // Same render target height is used for 32bpp and 64bpp to allow mixing them.
-  constexpr uint32_t kHeightTileRows = xenos::kEdramTileCount / kPitchTilesAt32bpp;
-  static_assert(kPitchTilesAt32bpp * kHeightTileRows == xenos::kEdramTileCount,
-                "Using width of the render target for EDRAM snapshot restoration that is "
-                "expected to result in the last row being fully utilized.");
-  constexpr uint32_t kHeight = kHeightTileRows * xenos::kEdramTileHeightSamples;
-  static_assert(kHeight <= xenos::kTexture2DCubeMaxWidthHeight,
-                "Using width of the render target for EDRAM snapshot restoration that is "
-                "expect to fully cover the EDRAM without exceeding the maximum guest "
-                "render target height.");
-  if (kHeight * draw_resolution_scale_y() > GetMaxRenderTargetHeight()) {
-    return nullptr;
-  }
-  RenderTargetKey render_target_key;
-  render_target_key.pitch_tiles_at_32bpp = kPitchTilesAt32bpp;
-  render_target_key.resource_format = uint32_t(GetColorResourceFormat(color_format));
-  RenderTarget* render_target = GetOrCreateRenderTarget(render_target_key);
-  if (!render_target) {
-    return nullptr;
-  }
-  // Change ownership, but don't transfer the contents - they will be replaced
-  // anyway.
-  ownership_ranges_.clear();
-  ownership_ranges_.emplace(std::piecewise_construct, std::forward_as_tuple(uint32_t(0)),
-                            std::forward_as_tuple(xenos::kEdramTileCount, render_target_key,
-                                                  RenderTargetKey(), RenderTargetKey()));
-  return render_target;
-}
-
 void RenderTargetCache::PixelShaderInterlockFullEdramBarrierPlaced() {
   assert_true(GetPath() == Path::kPixelShaderInterlock);
   // Clear ownership - any overlap of data written before the barrier is safe.

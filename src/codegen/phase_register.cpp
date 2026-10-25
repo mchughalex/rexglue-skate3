@@ -552,8 +552,11 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
   for (const auto& [address, cfg] : config.functions) {
     uint32_t size = cfg.getSize(address);
     std::string name = cfg.name.empty() ? fmt::format("sub_{:08X}", address) : cfg.name;
-    graph.addFunction(address, size, FunctionAuthority::CONFIG, true);
+    auto* node = graph.addFunction(address, size, FunctionAuthority::CONFIG, true);
     graph.setFunctionName(address, name);
+    if (node && cfg.shareRegisters) {
+      node->setSharesRegisters(true);
+    }
     configFuncs++;
 
     if (cfg.isChunk()) {

@@ -15,20 +15,11 @@
 #include <rex/logging.h>
 #include <rex/system/xmemory.h>
 
+#include "test_memory.h"
+
 namespace {
 
-// Shared memory instance - expensive to create, reuse across tests
-rex::memory::Memory& GetTestMemory() {
-  static rex::memory::Memory memory;
-  static bool initialized = false;
-  if (!initialized) {
-    rex::InitLogging();
-    bool result = memory.Initialize();
-    REQUIRE(result);
-    initialized = true;
-  }
-  return memory;
-}
+using rex::testing::GetTestMemory;
 
 // Helper to cast away const for heap operations
 rex::memory::BaseHeap* MutableHeap(const rex::memory::BaseHeap* heap) {

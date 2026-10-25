@@ -888,18 +888,6 @@ void VulkanCommandProcessor::InitializeShaderStorage(const std::filesystem::path
   pipeline_cache_->InitializeShaderStorage(cache_root, title_id, blocking);
 }
 
-void VulkanCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) {
-  shared_memory_->MemoryInvalidationCallback(base_ptr, length, true);
-  primitive_processor_->MemoryInvalidationCallback(base_ptr, length, true);
-}
-
-void VulkanCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
-  if (!BeginSubmission(true)) {
-    return;
-  }
-  render_target_cache_->RestoreEdramSnapshot(snapshot);
-}
-
 bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
                                                                 uint32_t packet, uint32_t count) {
   // Native guest-output renderer active: the framebuffer-sized draws between
@@ -968,9 +956,9 @@ bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuff
       return true;
     }
     bool is_end_via_z_pass =
-        sample_counts->ZPass_A == kQueryFinished && sample_counts->ZPass_B == kQueryFinished;
+        sample_counts->ZPass_A == kQueryFinished || sample_counts->ZPass_B == kQueryFinished;
     bool is_end_via_z_fail =
-        sample_counts->ZFail_A == kQueryFinished && sample_counts->ZFail_B == kQueryFinished;
+        sample_counts->ZFail_A == kQueryFinished || sample_counts->ZFail_B == kQueryFinished;
     std::memset(sample_counts, 0, sizeof(xenos::xe_gpu_depth_sample_counts));
     if (is_end_via_z_pass || is_end_via_z_fail) {
       sample_counts->ZPass_A = fake_sample_count;
@@ -980,9 +968,9 @@ bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuff
   };
 
   bool is_end_via_z_pass =
-      sample_counts->ZPass_A == kQueryFinished && sample_counts->ZPass_B == kQueryFinished;
+      sample_counts->ZPass_A == kQueryFinished || sample_counts->ZPass_B == kQueryFinished;
   bool is_end_via_z_fail =
-      sample_counts->ZFail_A == kQueryFinished && sample_counts->ZFail_B == kQueryFinished;
+      sample_counts->ZFail_A == kQueryFinished || sample_counts->ZFail_B == kQueryFinished;
   bool is_end = is_end_via_z_pass || is_end_via_z_fail;
 
   if (!is_end) {
@@ -1204,15 +1192,15 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
 
-  shared_memory_ = std::make_unique<VulkanSharedMemory>(*this, *memory_, trace_writer_,
-                                                        guest_shader_pipeline_stages_);
+  shared_memory_ =
+      std::make_unique<VulkanSharedMemory>(*this, *memory_, guest_shader_pipeline_stages_);
   if (!shared_memory_->Initialize()) {
     REXGPU_ERROR("Failed to initialize shared memory");
     return false;
   }
 
-  primitive_processor_ = std::make_unique<VulkanPrimitiveProcessor>(
-      *register_file_, *memory_, trace_writer_, *shared_memory_, *this);
+  primitive_processor_ =
+      std::make_unique<VulkanPrimitiveProcessor>(*register_file_, *memory_, *shared_memory_, *this);
   if (!primitive_processor_->Initialize()) {
     REXGPU_ERROR("Failed to initialize the geometric primitive processor");
     return false;
@@ -1276,8 +1264,7 @@ bool VulkanCommandProcessor::SetupContext() {
 
   // Requires the transient descriptor set layouts.
   render_target_cache_ = std::make_unique<VulkanRenderTargetCache>(
-      *register_file_, *memory_, trace_writer_, draw_resolution_scale_x, draw_resolution_scale_y,
-      *this);
+      *register_file_, *memory_, draw_resolution_scale_x, draw_resolution_scale_y, *this);
   if (!render_target_cache_->Initialize(shared_memory_binding_count)) {
     REXGPU_ERROR("Failed to initialize the render target cache");
     return false;
@@ -5234,7 +5221,8 @@ bool VulkanCommandProcessor::IssueCopy() {
   // resolves within its length bound must take the readback path regardless
   // of gameplay/scaling state.
   const bool force_readback_window =
-      REXCVAR_GET(native_render_force_resolve_readback_max_length) > 0;
+      REXCVAR_GET(native_render_force_resolve_readback_max_length) > 0 ||
+      REXCVAR_GET(readback_resolve_force_length) > 0;
   if (readback_mode == ReadbackResolveMode::kDisabled && !force_readback_window &&
       (!texture_cache_->IsDrawResolutionScaled() || gameplay_state_active)) {
     uint32_t written_address = 0;
@@ -5618,25 +5606,31 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
         REXCVAR_GET(native_render_force_resolve_readback_max_length);
     force_window_cpu_copy = force_readback_max_length > 0 &&
                             written_length <= uint32_t(force_readback_max_length);
-    if (!force_scaled_resolve_cpu_copy && !force_window_cpu_copy) {
+    // Always-on exact-length readback (Skate 1 photo target), quiet.
+    const int32_t force_length = REXCVAR_GET(readback_resolve_force_length);
+    const bool force_length_cpu_copy =
+        force_length > 0 && written_length == uint32_t(force_length);
+    if (!force_scaled_resolve_cpu_copy && !force_window_cpu_copy && !force_length_cpu_copy) {
       log_readback_decision("disabled-after-resolve", readback_mode);
       return true;
     }
     readback_mode = ReadbackResolveMode::kFull;
     force_scaled_resolve_sync_only = true;
-    log_readback_decision(
-        force_scaled_resolve_cpu_copy ? "targeted-scaled-resolve-full" : "forced-window-full",
-        readback_mode, false, true,
-        force_scaled_resolve_cpu_copy ? kImportSkaterPreviewResolveLength
-                                      : uint32_t(force_readback_max_length));
-    // Unconditional (the debug counters are boot-zeroed by the app): the
-    // app-armed shutter-burst window is ~1.5 s and the photo display card
-    // composes from exactly these CPU copies; visibility here is the whole
-    // diagnosis when the card is wrong (mirrors the D3D12 readback-window
-    // log).
-    REXLOG_INFO("readback-window: resolve dest=0x{:08X} len=0x{:X} -> CPU copy (kFull{})",
-                written_address, written_length,
-                force_scaled_resolve_cpu_copy ? ", targeted" : ", forced window");
+    if (force_scaled_resolve_cpu_copy || force_window_cpu_copy) {
+      log_readback_decision(
+          force_scaled_resolve_cpu_copy ? "targeted-scaled-resolve-full" : "forced-window-full",
+          readback_mode, false, true,
+          force_scaled_resolve_cpu_copy ? kImportSkaterPreviewResolveLength
+                                        : uint32_t(force_readback_max_length));
+      // Unconditional (the debug counters are boot-zeroed by the app): the
+      // app-armed shutter-burst window is ~1.5 s and the photo display card
+      // composes from exactly these CPU copies; visibility here is the whole
+      // diagnosis when the card is wrong (mirrors the D3D12 readback-window
+      // log).
+      REXLOG_INFO("readback-window: resolve dest=0x{:08X} len=0x{:X} -> CPU copy (kFull{})",
+                  written_address, written_length,
+                  force_scaled_resolve_cpu_copy ? ", targeted" : ", forced window");
+    }
   }
 
   const int32_t max_readback_length = REXCVAR_GET(vulkan_readback_resolve_max_length);
@@ -6698,26 +6692,6 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
   sample_counts->ZFail_B = 0;
   sample_counts->StencilFail_A = 0;
   sample_counts->StencilFail_B = 0;
-}
-
-void VulkanCommandProcessor::InitializeTrace() {
-  CommandProcessor::InitializeTrace();
-
-  if (!BeginSubmission(true)) {
-    return;
-  }
-  bool render_target_submitted = render_target_cache_->InitializeTraceSubmitDownloads();
-  bool shared_memory_submitted = shared_memory_->InitializeTraceSubmitDownloads();
-  if (!render_target_submitted && !shared_memory_submitted) {
-    return;
-  }
-  AwaitAllQueueOperationsCompletion();
-  if (render_target_submitted) {
-    render_target_cache_->InitializeTraceCompleteDownloads();
-  }
-  if (shared_memory_submitted) {
-    shared_memory_->InitializeTraceCompleteDownloads();
-  }
 }
 
 void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {

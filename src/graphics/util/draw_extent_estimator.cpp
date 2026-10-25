@@ -116,8 +116,6 @@ uint32_t DrawExtentEstimator::EstimateVertexMaxY(const Shader& vertex_shader) {
   if (vgt_draw_initiator.source_select == xenos::SourceSelect::kDMA) {
     xenos::IndexFormat index_format = vgt_draw_initiator.index_size;
     uint32_t index_buffer_base = regs[XE_GPU_REG_VGT_DMA_BASE];
-    uint32_t index_buffer_read_count =
-        std::min(uint32_t(vgt_draw_initiator.num_indices), uint32_t(vgt_dma_size.num_words));
     if (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt16) {
       // Handle the index endianness to same way as the PrimitiveProcessor.
       if (index_endian == xenos::Endian::k8in32) {
@@ -126,17 +124,9 @@ uint32_t DrawExtentEstimator::EstimateVertexMaxY(const Shader& vertex_shader) {
         index_endian = xenos::Endian::kNone;
       }
       index_buffer_base &= ~uint32_t(sizeof(uint16_t) - 1);
-      if (trace_writer_) {
-        trace_writer_->WriteMemoryRead(index_buffer_base,
-                                       sizeof(uint16_t) * index_buffer_read_count);
-      }
     } else {
       assert_true(vgt_draw_initiator.index_size == xenos::IndexFormat::kInt32);
       index_buffer_base &= ~uint32_t(sizeof(uint32_t) - 1);
-      if (trace_writer_) {
-        trace_writer_->WriteMemoryRead(index_buffer_base,
-                                       sizeof(uint32_t) * index_buffer_read_count);
-      }
     }
     index_buffer = memory_.TranslatePhysical(index_buffer_base);
   }

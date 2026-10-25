@@ -24,7 +24,7 @@ namespace rexglue::cli {
 using rex::Result;
 
 Result<void> CodegenFromConfig(const std::string& config_path, const CliContext& ctx,
-                               const std::vector<std::string>& targets);
+                               const std::vector<std::string>& targets, bool ignore_stamp = false);
 
 Result<std::string> DiscoverManifestInCwd();
 

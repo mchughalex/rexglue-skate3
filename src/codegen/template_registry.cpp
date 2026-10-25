@@ -10,6 +10,7 @@
 #include "template_registry_internal.h"
 
 #include <inja/inja.hpp>
+#include <rex/hash.h>
 #include <rex/logging.h>
 
 #include "codegen_logging.h"
@@ -19,6 +20,8 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace rex::codegen {
 
@@ -191,6 +194,26 @@ std::vector<std::string> TemplateRegistry::registeredIds() const {
     ids.push_back(id);
   }
   return ids;
+}
+
+std::string EmbeddedTemplatesHash() {
+  static const std::string hash = [] {
+    const auto& templates = embeddedTemplates();
+    std::vector<std::pair<std::string, std::string_view>> ordered(templates.begin(),
+                                                                  templates.end());
+    std::sort(ordered.begin(), ordered.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+
+    std::string accumulator;
+    for (const auto& [id, content] : ordered) {
+      accumulator += id;
+      accumulator += '\n';
+      accumulator += content;
+      accumulator += '\n';
+    }
+    return rex::hash_bytes(accumulator);
+  }();
+  return hash;
 }
 
 // ---------------------------------------------------------------------------

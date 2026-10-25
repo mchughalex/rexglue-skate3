@@ -22,7 +22,6 @@
 #include <rex/graphics/primitive_processor.h>
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/registers.h>
-#include <rex/graphics/trace_writer.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -639,9 +638,6 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
       // performed during conversion here. Also doing the endian swap here for
       // hosts not supporting 32-bit indices because indirection is only used
       // for the shared memory buffer.
-      // Writing to the trace irrespective of the cache lookup result because
-      // cache behavior depends on runtime configuration and state.
-      trace_writer_.WriteMemoryRead(guest_index_base, guest_index_buffer_needed_bytes);
       CacheTransaction cache_transaction(
           *this, CacheKey(guest_index_base, guest_draw_vertex_count, guest_index_format,
                           guest_index_endian, guest_primitive_reset_enabled, guest_primitive_type));
@@ -780,11 +776,7 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
             // If primitive reset with a non-0xFFFF index is used, replace with
             // 0xFFFF if 0xFFFF is not used as a real index, or with 0xFFFFFFFF
             // if it is.
-            // Writing to the trace irrespective of the cache lookup result
-            // because cache behavior depends on runtime configuration and
-            // state.
             // Example of 16-bit reset index replacement: 415607D4.
-            trace_writer_.WriteMemoryRead(guest_index_base, guest_index_buffer_needed_bytes);
             // Not specifying the primitive type in the cache key because not
             // replacing it, only the reset index in a type-independent way.
             CacheTransaction cache_transaction(
@@ -831,9 +823,6 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
           // actually used, thus exactly 0xFFFFFFFF must be sent to the host for
           // it in a true index buffer), no indirection is done, but
           // pre-swapping and pre-masking is done here.
-          // Writing to the trace irrespective of the cache lookup result
-          // because cache behavior depends on runtime configuration and state.
-          trace_writer_.WriteMemoryRead(guest_index_base, guest_index_buffer_needed_bytes);
           // Not specifying the primitive type in the cache key because not
           // replacing it, only the reset index in a type-independent way.
           CacheTransaction cache_transaction(
@@ -888,7 +877,6 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
       if (cacheable.index_buffer_type == ProcessedIndexBufferType::kGuestDMA &&
           guest_index_format == xenos::IndexFormat::kInt32 && !full_32bit_vertex_indices_used_ &&
           host_vertex_shader_type != Shader::HostVertexShaderType::kVertex) {
-        trace_writer_.WriteMemoryRead(guest_index_base, guest_index_buffer_needed_bytes);
         // No primitive-type conversion, just index normalization.
         CacheTransaction cache_transaction(
             *this, CacheKey(guest_index_base, guest_draw_vertex_count, guest_index_format,

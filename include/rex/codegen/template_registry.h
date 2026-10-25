@@ -66,4 +66,9 @@ class TemplateRegistry {
   std::unique_ptr<Impl> impl_;
 };
 
+/// SHA256 over every embedded template, ordered by ID. Fold this into any
+/// cache key built from the SDK version: that version is stable across dev
+/// builds, so a template edit alone would not otherwise invalidate it.
+std::string EmbeddedTemplatesHash();
+
 }  // namespace rex::codegen

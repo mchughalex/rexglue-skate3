@@ -24,9 +24,8 @@ class VulkanCommandProcessor;
 class VulkanPrimitiveProcessor final : public PrimitiveProcessor {
  public:
   VulkanPrimitiveProcessor(const RegisterFile& register_file, memory::Memory& memory,
-                           TraceWriter& trace_writer, SharedMemory& shared_memory,
-                           VulkanCommandProcessor& command_processor)
-      : PrimitiveProcessor(register_file, memory, trace_writer, shared_memory),
+                           SharedMemory& shared_memory, VulkanCommandProcessor& command_processor)
+      : PrimitiveProcessor(register_file, memory, shared_memory),
         command_processor_(command_processor) {}
   ~VulkanPrimitiveProcessor();
 

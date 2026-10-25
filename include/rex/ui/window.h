@@ -316,6 +316,27 @@ class Window {
   void CaptureMouse();
   void ReleaseMouse();
 
+  // Locks the pointer and switches motion events to relative deltas
+  // (MouseEvent::dx/dy), for mouse look. Returns whether it took.
+  virtual bool SetRelativeMouseMode(bool enable) {
+    (void)enable;
+    return false;
+  }
+  // Fallback when relative mode isn't available. Returns false, leaving the
+  // outputs untouched, unless the pointer verifiably reached the center.
+  virtual bool WarpMouseToCenter(int32_t& x_out, int32_t& y_out) {
+    (void)x_out;
+    (void)y_out;
+    return false;
+  }
+
+  // Desired state stored by the common Window, externally modifiable, read-only
+  // in the implementation. Whether the window is an active text input field for
+  // the OS input method. Leaving it on for the session pulls in IME candidate
+  // windows and the on screen keyboard during button-only gameplay.
+  bool IsTextInputActive() const { return text_input_active_; }
+  void SetTextInputActive(bool active);
+
   // Desired state stored by the common Window, externally modifiable, read-only
   // in the implementation.
   CursorVisibility GetCursorVisibility() const { return cursor_visibility_; }
@@ -325,13 +346,11 @@ class Window {
   // the cursor instantly.
   void SetCursorVisibility(CursorVisibility new_cursor_visibility);
 
-  // Enables or disables platform text input (character event delivery / IME)
-  // while a text widget is active. Characters are delivered to input listeners
-  // via OnKeyChar. On some platforms character events are always delivered
-  // (Win32 WM_CHAR, GTK) and this is a no-op; on SDL, character events are
-  // only delivered while text input is started, so this must be kept in sync
-  // by whoever hosts text widgets (done by ImGuiDrawer).
-  virtual void SetTextInputActive(bool /*active*/) {}
+
+  uint32_t GetCursorAutoHideDelayMs() const { return cursor_auto_hide_delay_ms_; }
+  // Idle time before kAutoHidden hides the cursor. Takes effect the next time
+  // the auto-hide timer is armed (the next mouse motion).
+  void SetCursorAutoHideDelayMs(uint32_t delay_ms) { cursor_auto_hide_delay_ms_ = delay_ms; }
 
   bool HasFocus() const { return HasActualState() ? has_focus_ : false; }
   // May be applied in a delayed way or dropped at all, HasFocus will not
@@ -545,6 +564,7 @@ class Window {
   // captured, in case something has released it in the OS.
   virtual void ApplyNewMouseCapture() {}
   virtual void ApplyNewMouseRelease() {}
+  virtual void ApplyNewTextInputActive() {}
   virtual void ApplyNewCursorVisibility(CursorVisibility old_cursor_visibility) {
     (void)old_cursor_visibility;
   }
@@ -570,6 +590,13 @@ class Window {
   // Will also disconnect the surface if needed.
   void OnBeforeClose(WindowDestructionReceiver& destruction_receiver);
   void OnAfterClose();
+
+  // Asks all listeners whether a user-initiated close may proceed. Returns
+  // false if any listener vetoed or the window was destroyed from a callback.
+  bool SendCloseRequestToListeners(WindowDestructionReceiver& destruction_receiver);
+
+  void OnMinimized(WindowDestructionReceiver& destruction_receiver);
+  void OnRestored(WindowDestructionReceiver& destruction_receiver);
 
   // These functions may usually also be called as part of the opening process
   // from within OpenImpl (directly or through the platform event handler
@@ -715,7 +742,11 @@ class Window {
 
   uint32_t mouse_capture_request_count_ = 0;
 
+  bool text_input_active_ = false;
+
   CursorVisibility cursor_visibility_ = CursorVisibility::kVisible;
+
+  uint32_t cursor_auto_hide_delay_ms_ = kDefaultCursorAutoHideMilliseconds;
 
   bool has_focus_ = false;
 

@@ -22,8 +22,13 @@
 namespace rex::filesystem {
 
 HostPathDevice::HostPathDevice(const std::string_view mount_path,
-                               const std::filesystem::path& host_path, bool read_only)
-    : Device(mount_path), name_("STFS"), host_path_(host_path), read_only_(read_only) {}
+                               const std::filesystem::path& host_path, bool read_only,
+                               bool allow_share_delete)
+    : Device(mount_path),
+      name_("STFS"),
+      host_path_(host_path),
+      read_only_(read_only),
+      allow_share_delete_(allow_share_delete) {}
 
 HostPathDevice::~HostPathDevice() = default;
 
@@ -70,6 +75,21 @@ Entry* HostPathDevice::ResolvePath(const std::string_view path) {
 
     auto* child = current_entry->GetChild(part);
     if (!child) {
+      // Stat the exact name first: enumerating a directory of hundreds of
+      // archives costs milliseconds a walk. Only casing mismatch reaches
+      // the scan below.
+      const auto exact_path = current_entry->host_path() / rex::to_path(part);
+      rex::filesystem::FileInfo exact_info;
+      if (rex::filesystem::GetInfo(exact_path, &exact_info)) {
+        auto* exact_child = HostPathEntry::Create(this, current_entry, exact_path, exact_info);
+        if (!exact_child) {
+          return nullptr;
+        }
+        current_entry->children_.push_back(std::unique_ptr<Entry>(exact_child));
+        current_entry = static_cast<HostPathEntry*>(exact_child);
+        continue;
+      }
+
       auto child_infos = rex::filesystem::ListFiles(current_entry->host_path());
       auto match = std::find_if(child_infos.begin(), child_infos.end(), [&](const auto& info) {
         return rex::string::utf8_equal_case(rex::path_to_utf8(info.name), part);

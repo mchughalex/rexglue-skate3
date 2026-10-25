@@ -24,7 +24,7 @@
 
 #include <rex/memory.h>
 #include <rex/memory/mapped_memory.h>
-#include <rex/ppc/context.h>
+#include <rex/ppc/func.h>
 #include <rex/system/export_resolver.h>
 #include <rex/system/thread_state.h>
 #include <rex/thread/mutex.h>
@@ -41,7 +41,8 @@ class ThreadState;
 class IModuleRegistrar {
  public:
   /**
-   * Returns false (and logs) if guest_address is outside every module range.
+   * Returns false (and logs) if guest_address is outside every registered
+   * function-table range.
    */
   virtual bool SetFunction(uint32_t guest_address, ::PPCFunc* func) = 0;
 
@@ -65,6 +66,13 @@ class FunctionDispatcher : public IModuleRegistrar {
   uint64_t Execute(ThreadState* thread_state, uint32_t address, uint64_t args[], size_t arg_count);
   uint64_t ExecuteInterrupt(ThreadState* thread_state, uint32_t address, uint64_t args[],
                             size_t arg_count);
+
+  /**
+   * Executes guest code on a thread already running guest code, then restores
+   * its full register state, matching the 360 kernel's trap-frame APC delivery.
+   */
+  uint64_t ExecuteTrap(ThreadState* thread_state, uint32_t address, uint64_t args[],
+                       size_t arg_count);
 
   // Shared thunk region size per module.
   static constexpr uint32_t kThunkReserveSize = 0x10000;  // 64KB

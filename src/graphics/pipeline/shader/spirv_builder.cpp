@@ -124,7 +124,9 @@ void SpirvBuilder::IfBuilder::makeBeginElse(bool branchToMerge) {
   assert_true(currentBranch == Branch::kThen);
 #endif
 
-  if (branchToMerge) {
+  // A block may have only one terminator, and glslang's createBranch appends
+  // unconditionally - check here, like SwitchBuilder::endSegment does.
+  if (branchToMerge && !builder.getBuildPoint()->isTerminated()) {
     // Close out the "then" by having it jump to the mergeBlock.
     thenPhiParent = builder.getBuildPoint()->getId();
     builder.createBranch(mergeBlock);
@@ -147,7 +149,8 @@ void SpirvBuilder::IfBuilder::makeEndIf(bool branchToMerge) {
   assert_true(currentBranch == Branch::kThen || currentBranch == Branch::kElse);
 #endif
 
-  if (branchToMerge) {
+  // Don't add a second terminator, as in makeBeginElse.
+  if (branchToMerge && !builder.getBuildPoint()->isTerminated()) {
     // Jump to the merge block.
     (elseBlock ? elsePhiParent : thenPhiParent) = builder.getBuildPoint()->getId();
     builder.createBranch(mergeBlock);

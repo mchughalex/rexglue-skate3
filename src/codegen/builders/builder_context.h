@@ -109,6 +109,12 @@ struct BuilderContext {
   //=========================================================================
 
   /**
+   * @brief Whether non-volatiles may be localized in the current function.
+   * False when the function shares registers with an intra-function bl partner.
+   */
+  bool localizeNonVolatiles() const;
+
+  /**
    * @brief Get expression for general-purpose register access.
    * @param index Register index (0-31)
    * @return "rN" for local variables, "ctx.rN" for context access

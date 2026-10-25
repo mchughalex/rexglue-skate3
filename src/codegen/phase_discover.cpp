@@ -15,7 +15,9 @@
 
 #include <array>
 #include <bitset>
+#include <optional>
 #include <unordered_set>
+#include <vector>
 
 #include <rex/codegen/phases.h>
 #include "phase_helpers.h"
@@ -113,26 +115,40 @@ void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
   // Pass pdataSize so forward branches within function extent are correctly identified.
   // Configured chunks are address-taken entries inside their parent, not hard local
   // branch boundaries for that parent.
-  auto effectiveKnownFunctions = knownFunctions;
+  // Copying knownFunctions (the whole graph) costs more than discovering the
+  // function, so collect the chunks to drop first and copy only when one is
+  // actually known.
+  std::vector<uint32_t> excludedChunks;
   const uint32_t chunkParent = graph.chunkParent(funcAddr);
   const uint32_t chunkLookupParent = chunkParent != 0 ? chunkParent : funcAddr;
   auto chunkIt = ctx.analysisState().chunksByParent.find(chunkLookupParent);
   if (chunkIt != ctx.analysisState().chunksByParent.end()) {
     for (uint32_t chunkAddr : chunkIt->second) {
-      effectiveKnownFunctions.erase(chunkAddr);
+      if (knownFunctions.contains(chunkAddr)) {
+        excludedChunks.push_back(chunkAddr);
+      }
     }
   }
   if (pdataSize != 0) {
     const uint32_t funcEnd = funcAddr + pdataSize;
     for (const auto& [_, chunkAddrs] : ctx.analysisState().chunksByParent) {
       for (uint32_t chunkAddr : chunkAddrs) {
-        if (chunkAddr >= funcAddr && chunkAddr < funcEnd) {
-          effectiveKnownFunctions.erase(chunkAddr);
+        if (chunkAddr >= funcAddr && chunkAddr < funcEnd && knownFunctions.contains(chunkAddr)) {
+          excludedChunks.push_back(chunkAddr);
         }
       }
     }
   }
-  auto result = discoverBlocks(decoded, funcAddr, *region, effectiveKnownFunctions, pdataSize);
+  std::optional<std::unordered_set<uint32_t>> effectiveKnownFunctions;
+  if (!excludedChunks.empty()) {
+    effectiveKnownFunctions.emplace(knownFunctions);
+    for (uint32_t chunkAddr : excludedChunks) {
+      effectiveKnownFunctions->erase(chunkAddr);
+    }
+  }
+  auto result = discoverBlocks(decoded, funcAddr, *region,
+                               effectiveKnownFunctions ? *effectiveKnownFunctions : knownFunctions,
+                               pdataSize, &ctx.Config().switchTables);
 
   if (result.blocks.empty()) {
     REXCODEGEN_WARN("Analyze: no blocks found for function 0x{:08X}", funcAddr);

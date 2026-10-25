@@ -24,6 +24,7 @@
 #include <rex/cvar.h>
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/flags.h>
+#include <rex/graphics/native_rhi.h>
 #include <rex/graphics/nvidia_app_profile.h>
 #include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
@@ -34,10 +35,6 @@
 #include <rex/ui/graphics_provider.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
-
-REXCVAR_DEFINE_STRING(trace_gpu_prefix, "", "GPU", "GPU trace file prefix");
-
-REXCVAR_DEFINE_BOOL(trace_gpu_stream, false, "GPU", "Enable GPU trace streaming");
 
 REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
     .allowed({"none", "fxaa", "fxaa_extreme"})
@@ -327,10 +324,6 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
   vsync_worker_thread_->set_name("GPU VSync");
   vsync_worker_thread_->Create();
 
-  if (REXCVAR_GET(trace_gpu_stream)) {
-    BeginTracing();
-  }
-
   return X_STATUS_SUCCESS;
 }
 
@@ -338,7 +331,6 @@ void GraphicsSystem::Shutdown() {
   shutting_down_.store(true, std::memory_order_release);
 
   if (command_processor_) {
-    EndTracing();
     command_processor_->Shutdown();
     command_processor_.reset();
   }
@@ -500,6 +492,15 @@ void GraphicsSystem::InvalidateGpuMemory() {
 
 void GraphicsSystem::InitializeShaderStorage(const std::filesystem::path& cache_root,
                                              uint32_t title_id, bool blocking) {
+  // Native-render RHI shader bytecode cache: the D3D12 backend runtime-
+  // compiles its HLSL, and the largest scene shader costs seconds on the
+  // render thread at first-frame pipeline creation; cached bytecode turns
+  // every launch after the first into a file read. The host reaches the plugin
+  // through IGraphicsSystem only, so the directory is derived here, before the
+  // guest module starts drawing.
+  if (!cache_root.empty()) {
+    nrhi::SetShaderBytecodeCacheDirectory((cache_root / "nrhi_shaders").string().c_str());
+  }
   if (!REXCVAR_GET(store_shaders)) {
     return;
   }
@@ -521,18 +522,6 @@ void GraphicsSystem::InitializeShaderStorage(const std::filesystem::path& cache_
       command_processor_->InitializeShaderStorage(cache_root, title_id, false);
     });
   }
-}
-
-void GraphicsSystem::RequestFrameTrace() {
-  command_processor_->RequestFrameTrace(REXCVAR_GET(trace_gpu_prefix));
-}
-
-void GraphicsSystem::BeginTracing() {
-  command_processor_->BeginTracing(REXCVAR_GET(trace_gpu_prefix));
-}
-
-void GraphicsSystem::EndTracing() {
-  command_processor_->EndTracing();
 }
 
 void GraphicsSystem::Pause() {

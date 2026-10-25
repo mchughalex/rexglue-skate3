@@ -19,7 +19,6 @@
 #include <rex/graphics/format/ucode.h>
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/register_file.h>
-#include <rex/graphics/trace_writer.h>
 #include <rex/graphics/xenos.h>
 #include <rex/memory.h>
 
@@ -37,8 +36,6 @@ class ShaderInterpreter {
     virtual void Export(ucode::ExportRegister /*export_register*/, const float* /*value*/,
                         uint32_t /*value_mask*/) {}
   };
-
-  void SetTraceWriter(TraceWriter* new_trace_writer) { trace_writer_ = new_trace_writer; }
 
   ExportSink* GetExportSink() const { return export_sink_; }
   void SetExportSink(ExportSink* new_export_sink) { export_sink_ = new_export_sink; }
@@ -123,8 +120,6 @@ class ShaderInterpreter {
 
   const RegisterFile& register_file_;
   const memory::Memory& memory_;
-
-  TraceWriter* trace_writer_ = nullptr;
 
   ExportSink* export_sink_ = nullptr;
 

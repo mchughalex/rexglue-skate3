@@ -23,6 +23,10 @@
 #include <rex/ui/vulkan/instance.h>
 #include <rex/ui/vulkan/presenter.h>
 
+#if REX_PLATFORM_MAC
+#include "vulkan_moltenvk.h"
+#endif
+
 REXCVAR_DEFINE_BOOL(vulkan_log_debug_messages, false, "UI/Vulkan", "Log Vulkan debug messages");
 
 namespace rex {
@@ -33,27 +37,6 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
                                                        const bool try_enable_validation) {
   std::unique_ptr<VulkanInstance> vulkan_instance(new VulkanInstance());
 
-#if REX_PLATFORM_MAC
-  // The Vulkan loader does not discover executable-local MoltenVK manifests by
-  // default. Prefer user-provided loader settings, but make release folders run
-  // without requiring VK_ICD_FILENAMES in the shell.
-  if (!std::getenv("VK_ICD_FILENAMES") && !std::getenv("VK_DRIVER_FILES")) {
-    const auto executable_folder = rex::filesystem::GetExecutableFolder();
-    const std::filesystem::path local_icd_paths[] = {
-        executable_folder / "MoltenVK_icd.json",
-        executable_folder / "share" / "vulkan" / "icd.d" / "MoltenVK_icd.json",
-    };
-    for (const auto& local_icd_path : local_icd_paths) {
-      if (std::filesystem::is_regular_file(local_icd_path)) {
-        std::string local_icd_path_string = local_icd_path.string();
-        setenv("VK_ICD_FILENAMES", local_icd_path_string.c_str(), 0);
-        setenv("VK_DRIVER_FILES", local_icd_path_string.c_str(), 0);
-        break;
-      }
-    }
-  }
-#endif
-
   // Load the RenderDoc API if connected.
 
   vulkan_instance->renderdoc_api_ = RenderDocAPI::CreateIfConnected();
@@ -63,15 +46,44 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
   Functions& ifn = vulkan_instance->functions_;
 
   bool functions_loaded = true;
-  if (!vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoader)
+  bool loader_loaded = false;
 #if REX_PLATFORM_MAC
-      && !vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoaderFallback)
-      && !vulkan_instance->loader_.Load(platform::lib_names::kMoltenVK)
-#endif
-  ) {
+  const MacOSVulkanRuntimePaths macos_runtime_paths = DetectMacOSVulkanRuntimePaths();
+  ConfigureMacOSVulkanEnvironment(macos_runtime_paths);
+
+  std::vector<std::filesystem::path> loader_candidates = macos_runtime_paths.loader_candidates;
+  loader_candidates.emplace_back(platform::lib_names::kVulkanLoader);
+  loader_candidates.emplace_back("libvulkan.dylib");
+  loader_candidates.emplace_back("libMoltenVK.dylib");
+
+  std::vector<std::string> attempted_loader_paths;
+  attempted_loader_paths.reserve(loader_candidates.size());
+  for (const std::filesystem::path& candidate : loader_candidates) {
+    if (candidate.empty()) {
+      continue;
+    }
+    attempted_loader_paths.push_back(candidate.string());
+    if (vulkan_instance->loader_.Load(candidate)) {
+      loader_loaded = true;
+      REXLOG_INFO("Loaded Vulkan runtime from {}", candidate.string());
+      break;
+    }
+  }
+  if (!loader_loaded) {
+    REXLOG_ERROR("Failed to load a Vulkan runtime on macOS");
+    for (const std::string& attempted_loader_path : attempted_loader_paths) {
+      REXLOG_ERROR("* tried {}", attempted_loader_path);
+    }
+    return nullptr;
+  }
+#else
+  loader_loaded = vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoader);
+  if (!loader_loaded) {
     REXLOG_ERROR("Failed to load {}", platform::lib_names::kVulkanLoader);
     return nullptr;
   }
+#endif
+
 #define XE_VULKAN_LOAD_LOADER_FUNCTION(name) \
   functions_loaded &= (ifn.name = vulkan_instance->loader_.GetSymbol<PFN_##name>(#name)) != nullptr;
   XE_VULKAN_LOAD_LOADER_FUNCTION(vkGetInstanceProcAddr);
@@ -135,6 +147,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     requested_extensions.emplace("VK_KHR_xcb_surface",
                                  &vulkan_instance->extensions_.ext_KHR_xcb_surface);
 #endif
+#ifdef VK_USE_PLATFORM_WAYLAND_KHR
+    // #7.
+    requested_extensions.emplace("VK_KHR_wayland_surface",
+                                 &vulkan_instance->extensions_.ext_KHR_wayland_surface);
+#endif
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
     // #9.
     requested_extensions.emplace("VK_KHR_android_surface",
@@ -146,7 +163,7 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
                                  &vulkan_instance->extensions_.ext_KHR_win32_surface);
 #endif
 #ifdef VK_USE_PLATFORM_METAL_EXT
-    // #218.
+    // #217.
     requested_extensions.emplace("VK_EXT_metal_surface",
                                  &vulkan_instance->extensions_.ext_EXT_metal_surface);
 #endif
@@ -401,6 +418,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
 #ifdef VK_USE_PLATFORM_XCB_KHR
   if (vulkan_instance->extensions_.ext_KHR_xcb_surface) {
 #include <rex/ui/vulkan/functions/instance_khr_xcb_surface.inc>
+  }
+#endif
+#ifdef VK_USE_PLATFORM_WAYLAND_KHR
+  if (vulkan_instance->extensions_.ext_KHR_wayland_surface) {
+#include <rex/ui/vulkan/functions/instance_khr_wayland_surface.inc>
   }
 #endif
 #ifdef VK_USE_PLATFORM_ANDROID_KHR

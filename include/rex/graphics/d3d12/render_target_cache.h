@@ -27,7 +27,6 @@
 #include <rex/graphics/d3d12/texture_cache.h>
 #include <rex/graphics/flags.h>
 #include <rex/graphics/pipeline/render_target/cache.h>
-#include <rex/graphics/trace_writer.h>
 #include <rex/graphics/util/draw.h>
 #include <rex/graphics/xenos.h>
 #include <rex/memory.h>
@@ -42,13 +41,10 @@ class D3D12CommandProcessor;
 class D3D12RenderTargetCache final : public RenderTargetCache {
  public:
   D3D12RenderTargetCache(const RegisterFile& register_file, const memory::Memory& memory,
-                         TraceWriter& trace_writer, uint32_t draw_resolution_scale_x,
-                         uint32_t draw_resolution_scale_y, D3D12CommandProcessor& command_processor,
-                         bool bindless_resources_used)
-      : RenderTargetCache(register_file, memory, &trace_writer, draw_resolution_scale_x,
-                          draw_resolution_scale_y),
+                         uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
+                         D3D12CommandProcessor& command_processor, bool bindless_resources_used)
+      : RenderTargetCache(register_file, memory, draw_resolution_scale_x, draw_resolution_scale_y),
         command_processor_(command_processor),
-        trace_writer_(trace_writer),
         bindless_resources_used_(bindless_resources_used) {}
   ~D3D12RenderTargetCache() override;
 
@@ -82,11 +78,6 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   bool Resolve(const memory::Memory& memory, D3D12SharedMemory& shared_memory,
                D3D12TextureCache& texture_cache, uint32_t& written_address_out,
                uint32_t& written_length_out);
-
-  // Returns true if any downloads were submitted to the command processor.
-  bool InitializeTraceSubmitDownloads();
-  void InitializeTraceCompleteDownloads();
-  void RestoreEdramSnapshot(const void* snapshot);
 
   // For host render targets.
 
@@ -144,14 +135,13 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
       EdramBufferModificationStatus commit_status = EdramBufferModificationStatus::kAsROV);
 
   D3D12CommandProcessor& command_processor_;
-  TraceWriter& trace_writer_;
   bool bindless_resources_used_;
 
   Path path_ = Path::kHostRenderTargets;
 
   // For host render targets, an EDRAM-sized scratch buffer for:
   // - Guest render target data copied from host render targets during copying
-  //   in resolves and in frame trace creation.
+  //   in resolves.
   // - Host float32 depth in ownership transfers when the host depth texture and
   //   the destination are the same.
   // For rasterizer-ordered view, the buffer containing the EDRAM data.
@@ -198,10 +188,6 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
       kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
   ID3D12PipelineState* resolve_copy_pipelines_[size_t(draw_util::ResolveCopyShaderIndex::kCount)] =
       {};
-
-  // For traces.
-  ID3D12Resource* edram_snapshot_download_buffer_ = nullptr;
-  std::unique_ptr<ui::d3d12::D3D12UploadBufferPool> edram_snapshot_restore_pool_;
 
   // For host render targets.
 

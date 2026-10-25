@@ -40,7 +40,7 @@ class ThreadState {
   uint32_t thread_id_ = 0;
 
   // NOTE: must be 64b aligned for SSE ops.
-  alignas(64)::PPCContext context_storage_;
+  alignas(64)::PPCContext context_storage_{};
   ::PPCContext* context_ = &context_storage_;
 };
 

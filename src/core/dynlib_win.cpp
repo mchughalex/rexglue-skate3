@@ -24,10 +24,22 @@ DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
   return *this;
 }
 
-bool DynamicLibrary::Load(const std::filesystem::path& path) {
+bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution /*mode*/) {
+  // Windows resolves all imports at load time; mode is informational only.
   Close();
   handle_ = static_cast<void*>(LoadLibraryW(path.c_str()));
   return handle_ != nullptr;
+}
+
+bool DynamicLibrary::LoadIfAlreadyLoaded(const std::filesystem::path& path) {
+  Close();
+  // Flags 0 takes a reference, matched by the FreeLibrary in Close.
+  HMODULE module = nullptr;
+  if (!GetModuleHandleExW(0, path.c_str(), &module)) {
+    return false;
+  }
+  handle_ = static_cast<void*>(module);
+  return true;
 }
 
 void DynamicLibrary::Close() {

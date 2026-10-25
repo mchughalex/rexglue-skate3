@@ -14,6 +14,20 @@
  *
  * Available types: BOOL, INT32, INT64, UINT32, UINT64, DOUBLE, STRING, COMMAND
  *
+ * @section cvar_commands Defining Commands
+ *
+ * No-argument command:
+ * @code
+ * REXCVAR_DEFINE_COMMAND(my_cmd, []() { DoThing(); }, "Category", "Description");
+ * @endcode
+ *
+ * Argument-taking command (the console passes the text after the name):
+ * @code
+ * REXCVAR_DEFINE_COMMAND_ARGS(echo, [](std::string_view args) {
+ *   REXLOG_INFO("{}", args);
+ * }, "Console", "Echo arguments");
+ * @endcode
+ *
  * @section cvar_declaring Declaring CVars (for use in other files)
  *
  * @code
@@ -98,6 +112,8 @@
 #include <utility>
 #include <vector>
 
+#include <rex/string/numeric.h>
+
 namespace rex::cvar {
 
 //=============================================================================
@@ -128,6 +144,16 @@ enum class Lifecycle {
   kRequiresRestart  // Can be changed, but only takes effect after restart
 };
 
+// Where a flag's current value came from, in ascending priority. A source
+// never overwrites a value a higher-priority source already set.
+enum class Source {
+  kDefault,      // Compiled-in default
+  kConfig,       // TOML config file
+  kEnvironment,  // REX_* environment variable
+  kCommandLine,  // --flag on the command line
+  kRuntime       // SetFlagByName from the console, settings UI, or code
+};
+
 // Validation constraints
 struct Constraints {
   std::optional<double> min;
@@ -146,11 +172,12 @@ struct FlagEntry {
   std::string description;
   std::function<bool(std::string_view)> setter;
   std::function<std::string()> getter;
-  std::function<void()> command_callback;
+  std::function<void(std::string_view args)> command_callback;
   Lifecycle lifecycle = Lifecycle::kHotReload;
   Constraints constraints;
   std::string default_value;
   bool is_debug_only = false;
+  Source source = Source::kDefault;
 };
 
 std::vector<FlagEntry>& GetRegistry();
@@ -168,7 +195,20 @@ std::optional<size_t> RegisterFlag(FlagEntry entry);
 void UnregisterFlag(std::string_view name);
 
 bool SetFlagByName(std::string_view name, std::string_view value);
+
+// Applies a value parsed off the command line. Returns false only when the
+// value is rejected (unparseable, or outside the flag's constraints); a value
+// skipped because a higher-priority source already won returns true.
+bool SetFlagFromCommandLine(std::string_view name, std::string_view value);
+
 std::string GetFlagByName(std::string_view name);
+
+// Which source last wrote this flag. Returns Source::kDefault for unknown names.
+Source GetFlagSource(std::string_view name);
+
+// Invoke a registered command by name, passing the raw argument text.
+// Returns false if `name` is not registered or is not a FlagType::Command.
+bool InvokeCommand(std::string_view name, std::string_view args);
 
 // Typed registry query. Cross-DLL access path that does not require linking
 // the DLL where the cvar is defined. Slower than REXCVAR_GET (string parse +
@@ -329,12 +369,12 @@ inline bool ParseDouble(std::string_view s, double& out) {
                                   category,                                                      \
                                   desc,                                                          \
                                   [](std::string_view v) {                                       \
-                                    bool val = (v == "true" || v == "1" || v == "yes");          \
+                                    bool val = ::rex::string::from_string<bool>(v, false);       \
                                     FLAGS_##name##_storage_() = val;                             \
                                     return true;                                                 \
                                   },                                                             \
                                   []() { return FLAGS_##name##_storage_() ? "true" : "false"; }, \
-                                  []() { return; },                                              \
+                                  [](std::string_view) {},                                       \
                                   ::rex::cvar::Lifecycle::kHotReload,                            \
                                   {},                                                            \
                                   (default_val) ? "true" : "false",                              \
@@ -360,7 +400,7 @@ inline bool ParseDouble(std::string_view s, double& out) {
                                     return true;                                              \
                                   },                                                          \
                                   []() { return std::to_string(FLAGS_##name##_storage_()); }, \
-                                  []() { return; },                                           \
+                                  [](std::string_view) {},                                    \
                                   ::rex::cvar::Lifecycle::kHotReload,                         \
                                   {},                                                         \
                                   std::to_string(default_val),                                \
@@ -386,7 +426,7 @@ inline bool ParseDouble(std::string_view s, double& out) {
                                     return true;                                              \
                                   },                                                          \
                                   []() { return std::to_string(FLAGS_##name##_storage_()); }, \
-                                  []() { return; },                                           \
+                                  [](std::string_view) {},                                    \
                                   ::rex::cvar::Lifecycle::kHotReload,                         \
                                   {},                                                         \
                                   std::to_string(default_val),                                \
@@ -412,7 +452,7 @@ inline bool ParseDouble(std::string_view s, double& out) {
                                     return true;                                              \
                                   },                                                          \
                                   []() { return std::to_string(FLAGS_##name##_storage_()); }, \
-                                  []() { return; },                                           \
+                                  [](std::string_view) {},                                    \
                                   ::rex::cvar::Lifecycle::kHotReload,                         \
                                   {},                                                         \
                                   std::to_string(default_val),                                \
@@ -438,7 +478,7 @@ inline bool ParseDouble(std::string_view s, double& out) {
                                     return true;                                              \
                                   },                                                          \
                                   []() { return std::to_string(FLAGS_##name##_storage_()); }, \
-                                  []() { return; },                                           \
+                                  [](std::string_view) {},                                    \
                                   ::rex::cvar::Lifecycle::kHotReload,                         \
                                   {},                                                         \
                                   std::to_string(default_val),                                \
@@ -462,7 +502,7 @@ inline bool ParseDouble(std::string_view s, double& out) {
                                     return true;                                              \
                                   },                                                          \
                                   []() { return std::to_string(FLAGS_##name##_storage_()); }, \
-                                  []() { return; },                                           \
+                                  [](std::string_view) {},                                    \
                                   ::rex::cvar::Lifecycle::kHotReload,                         \
                                   {},                                                         \
                                   std::to_string(default_val),                                \
@@ -483,28 +523,49 @@ inline bool ParseDouble(std::string_view s, double& out) {
                                     return true;                                \
                                   },                                            \
                                   []() { return FLAGS_##name##_storage_(); },   \
-                                  []() { return; },                             \
+                                  [](std::string_view) {},                      \
                                   ::rex::cvar::Lifecycle::kHotReload,           \
                                   {},                                           \
                                   default_val,                                  \
                                   false})
 
-#define REXCVAR_DEFINE_COMMAND(name, callback, category, desc)            \
-  std::function<void()>& FLAGS_##name##_storage_() {                      \
-    static std::function<void()> storage = (callback);                    \
-    return storage;                                                       \
-  }                                                                       \
-  static auto _cvar_reg_##name =                                          \
-      ::rex::cvar::FlagRegistrar({#name,                                  \
-                                  ::rex::cvar::FlagType::Command,         \
-                                  category,                               \
-                                  desc,                                   \
-                                  [](std::string_view) { return false; }, \
-                                  []() { return "<command>"; },           \
-                                  callback,                               \
-                                  ::rex::cvar::Lifecycle::kHotReload,     \
-                                  {},                                     \
-                                  "<command>",                            \
+#define REXCVAR_DEFINE_COMMAND(name, callback, category, desc)                           \
+  std::function<void()>& FLAGS_##name##_storage_() {                                     \
+    static std::function<void()> storage = (callback);                                   \
+    return storage;                                                                      \
+  }                                                                                      \
+  static auto _cvar_reg_##name =                                                         \
+      ::rex::cvar::FlagRegistrar({#name,                                                 \
+                                  ::rex::cvar::FlagType::Command,                        \
+                                  category,                                              \
+                                  desc,                                                  \
+                                  [](std::string_view) { return false; },                \
+                                  []() { return "<command>"; },                          \
+                                  [](std::string_view) { FLAGS_##name##_storage_()(); }, \
+                                  ::rex::cvar::Lifecycle::kHotReload,                    \
+                                  {},                                                    \
+                                  "<command>",                                           \
+                                  false})
+
+// Define an argument-taking command. `callback` is convertible to
+// std::function<void(std::string_view args)>; the console passes the text
+// after the command name as `args`.
+#define REXCVAR_DEFINE_COMMAND_ARGS(name, callback, category, desc)                         \
+  std::function<void(std::string_view)>& FLAGS_##name##_storage_() {                        \
+    static std::function<void(std::string_view)> storage = (callback);                      \
+    return storage;                                                                         \
+  }                                                                                         \
+  static auto _cvar_reg_##name =                                                            \
+      ::rex::cvar::FlagRegistrar({#name,                                                    \
+                                  ::rex::cvar::FlagType::Command,                           \
+                                  category,                                                 \
+                                  desc,                                                     \
+                                  [](std::string_view) { return false; },                   \
+                                  []() { return "<command>"; },                             \
+                                  [](std::string_view a) { FLAGS_##name##_storage_()(a); }, \
+                                  ::rex::cvar::Lifecycle::kHotReload,                       \
+                                  {},                                                       \
+                                  "<command>",                                              \
                                   false})
 
 namespace rex::cvar {

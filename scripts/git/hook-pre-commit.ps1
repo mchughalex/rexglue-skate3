@@ -62,10 +62,11 @@ function Extract-Staged {
 
 try {
     # -- clang-format (C/C++) --------------------------------------------------
-    if ($cppFiles.Count -gt 0 -and (Get-Command clang-format -ErrorAction SilentlyContinue)) {
+    if ($cppFiles.Count -gt 0) {
+        $clangFormat = Get-ReXClangFormat
         foreach ($file in $cppFiles) {
             $tmpFile = Extract-Staged $file
-            & clang-format --dry-run --Werror `
+            & $clangFormat --dry-run --Werror `
                 --style="file:$RepoRoot/.clang-format" `
                 $tmpFile *> $null
             if ($LASTEXITCODE -ne 0) {

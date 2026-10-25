@@ -33,8 +33,10 @@ REXCVAR_DEFINE_INT32(window_height, 0, "UI/Window",
     .range(0, 8192)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_BOOL(fullscreen, true, "UI/Window", "Start the window in fullscreen mode")
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+// kHotReload (default): Window::SetFullscreen can be applied live, so the
+// change callback registered in ReXApp::SetupPresentation keeps the window
+// in sync whenever this cvar is changed at runtime.
+REXCVAR_DEFINE_BOOL(fullscreen, true, "UI/Window", "Start the window in fullscreen mode");
 
 REXCVAR_DEFINE_INT32(monitor, 0, "UI/Window",
                      "Monitor index to display on (0 = default, 1 = primary, 2 = "
@@ -42,20 +44,26 @@ REXCVAR_DEFINE_INT32(monitor, 0, "UI/Window",
     .range(0, 16)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_INT32(video_mode_width, 1280, "GPU", "Guest video mode width in pixels")
+REXCVAR_DEFINE_STRING(video_driver, "", "UI/Window",
+                      "SDL video driver to use, such as \"wayland\" or \"x11\". Empty picks "
+                      "SDL's default for the session")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_INT32(video_mode_width, 1280, "Display", "Guest video mode width in pixels")
     .range(640, 0x0FFF)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_INT32(video_mode_height, 720, "GPU", "Guest video mode height in pixels")
+REXCVAR_DEFINE_INT32(video_mode_height, 720, "Display", "Guest video mode height in pixels")
     .range(480, 0x0FFF)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_STRING(resolution, "", "GPU",
+REXCVAR_DEFINE_STRING(resolution, "", "Display",
                       "Common resolution preset for both guest video mode and startup window (for "
                       "example: 720p, 1080p, 1440p, 4k, 1280x720)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_DOUBLE(video_mode_refresh_rate, 60.0, "GPU", "Guest video mode refresh rate in Hz")
+REXCVAR_DEFINE_DOUBLE(video_mode_refresh_rate, 60.0, "Display",
+                      "Guest video mode refresh rate in Hz")
     .range(24.0, 240.0)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
@@ -420,6 +428,21 @@ void Window::ReleaseMouse() {
   }
 }
 
+void Window::SetTextInputActive(bool active) {
+  if (text_input_active_ == active) {
+    return;
+  }
+  text_input_active_ = active;
+  if (!CanApplyState()) {
+    return;
+  }
+  WindowDestructionReceiver destruction_receiver(this);
+  ApplyNewTextInputActive();
+  if (destruction_receiver.IsWindowDestroyedOrStateInapplicable()) {
+    return;
+  }
+}
+
 void Window::SetCursorVisibility(CursorVisibility new_cursor_visibility) {
   if (cursor_visibility_ == new_cursor_visibility) {
     return;
@@ -477,9 +500,16 @@ void Window::OnSurfaceChanged(bool new_surface_potentially_exists) {
     return;
   }
 
-  presenter_surface_ = CreateSurface(presenter_->GetSupportedSurfaceTypes());
+  Surface::TypeFlags supported_types = presenter_->GetSupportedSurfaceTypes();
+  presenter_surface_ = CreateSurface(supported_types);
   if (presenter_surface_) {
     presenter_->SetWindowSurfaceFromUIThread(this, presenter_surface_.get());
+  } else if (phase_ == Phase::kOpen) {
+    // Usually a session whose native surface extension the driver lacks.
+    REXLOG_ERROR(
+        "No presentable surface for this window. The graphics provider supports surface types "
+        "{:#x}. Set the video_driver cvar to force a different session type.",
+        supported_types);
   }
 }
 
@@ -586,6 +616,42 @@ void Window::OnFocusUpdate(bool new_has_focus, WindowDestructionReceiver& destru
   if (destruction_receiver.IsWindowDestroyed()) {
     return;
   }
+}
+
+bool Window::SendCloseRequestToListeners(WindowDestructionReceiver& destruction_receiver) {
+  if (!CanSendEventsToListeners()) {
+    return true;
+  }
+  UIEvent e(this);
+  // Snapshot: listeners may add/remove listeners or destroy the window from
+  // within the callback, and a veto must stop iteration immediately.
+  std::vector<WindowListener*> listeners(listeners_);
+  for (WindowListener* listener : listeners) {
+    bool proceed = listener->OnCloseRequested(e);
+    if (destruction_receiver.IsWindowDestroyed()) {
+      return false;
+    }
+    if (!proceed) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void Window::OnMinimized(WindowDestructionReceiver& destruction_receiver) {
+  if (!CanSendEventsToListeners()) {
+    return;
+  }
+  UIEvent e(this);
+  SendEventToListeners([&e](auto listener) { listener->OnMinimized(e); }, destruction_receiver);
+}
+
+void Window::OnRestored(WindowDestructionReceiver& destruction_receiver) {
+  if (!CanSendEventsToListeners()) {
+    return;
+  }
+  UIEvent e(this);
+  SendEventToListeners([&e](auto listener) { listener->OnRestored(e); }, destruction_receiver);
 }
 
 void Window::OnPaint(bool force_paint) {

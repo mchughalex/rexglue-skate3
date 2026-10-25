@@ -18,7 +18,7 @@
 #include <vector>
 
 #include <rex/memory/utils.h>
-#include <rex/ppc/context.h>  // PPCFunc type (minimal header)
+#include <rex/ppc/func.h>  // PPCFunc type
 #include <rex/system/mmio_handler.h>
 #include <rex/thread/mutex.h>
 
@@ -28,12 +28,22 @@ class ByteStream;
 
 namespace rex::memory::detail {
 
-/// Compensates for host allocation granularities larger than Xenon's 4 KB
-/// pages on the 0xE0000000 physical heap. The memory views are rounded down to
-/// the host granularity, while the heap tracks the requested 4 KB-aligned guest
-/// range via host_address_offset.
-inline u32 PhysicalHostOffset(u32 guest_addr) noexcept {
-  return (guest_addr >= 0xE0000000u && allocation_granularity() > 0x1000) ? 0x1000u : 0u;
+/// Compensates for host allocation granularity coarser than 4KB on the 0xE0
+/// physical heap. When the granularity exceeds 0x1000, the backing file maps the
+/// 0xE0 heap at a 0x1000-byte offset that the mapping API rounds away (Windows
+/// MapViewOfFileEx rounds down to 64KB; macOS arm64 uses 16KB pages), so guest
+/// accesses must add it back. This must agree with Memory::MapViews, which only
+/// sets host_address_offset when allocation_granularity() > 0x1000:
+///   - Windows:        64KB granularity  -> offset
+///   - macOS arm64:    16KB granularity  -> offset
+///   - macOS x86_64:    4KB granularity  -> no offset
+///   - Linux (any):     4KB granularity  -> no offset (mmap handles it natively)
+constexpr u32 PhysicalHostOffset([[maybe_unused]] u32 guest_addr) noexcept {
+#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && defined(__aarch64__))
+  return (guest_addr >= 0xE0000000u) ? 0x1000u : 0u;
+#else
+  return 0u;
+#endif
 }
 
 }  // namespace rex::memory::detail
@@ -234,6 +244,31 @@ class BaseHeap {
  protected:
   BaseHeap();
 
+  // Callers must hold the global critical region - see
+  // AcquireHostPageReconcileLock.
+  bool SyncHostPageAccess(uint32_t start_page_number, uint32_t end_page_number);
+
+  // Acquires the global critical region for operations that will run the host
+  // page reconcile pass, which reads watch state guarded by it.
+  //
+  // It must be taken before heap_mutex_, not partway through: mutex.h requires
+  // the global region to be acquired first and held longest, and
+  // PhysicalHeap::Decommit/Release/Protect already call down into BaseHeap
+  // with it held. Acquiring it inside SyncHostPageAccess instead would give
+  // those paths heap_mutex_ -> global while PhysicalHeap has global ->
+  // heap_mutex_, which deadlocks.
+  //
+  // Returns an empty (unlocked) guard when guest pages are at least host page
+  // sized, since no reconcile happens then and the lock would be pure cost.
+  virtual std::unique_lock<std::recursive_mutex> AcquireHostPageReconcileLock() const;
+
+  // Whether a host page is currently write-watched for guest invalidation.
+  // SyncHostPageAccess must not restore write access to such a page: the watch
+  // is recorded in a flag that EnableAccessCallbacks checks before re-applying
+  // protection, so silently unprotecting here would disable the watch forever.
+  // Only PhysicalHeap tracks this; every other heap has no watch state.
+  virtual bool IsHostPageWriteWatched(uint32_t host_page_number) const { return false; }
+
   void Initialize(memory::Memory* memory, uint8_t* membase, HeapType heap_type, uint32_t heap_base,
                   uint32_t heap_size, uint32_t page_size, uint32_t host_address_offset = 0);
 
@@ -302,6 +337,14 @@ class PhysicalHeap : public BaseHeap {
   uint32_t GetPhysicalAddress(uint32_t address) const;
 
  protected:
+  bool IsHostPageWriteWatched(uint32_t host_page_number) const override;
+
+  // Allocation on these heaps delegates to parent_heap_, whose own reconcile
+  // pass takes the global critical region. Acquire whenever this heap or its
+  // parent will need it, so the ordering holds even for a heap whose own guest
+  // pages are large enough to skip reconciling but whose parent's are not.
+  std::unique_lock<std::recursive_mutex> AcquireHostPageReconcileLock() const override;
+
   VirtualHeap* parent_heap_;
 
   uint32_t system_page_size_;
@@ -529,6 +572,9 @@ class Memory {
   bool HasAnyFunctionTable() const;
 
  private:
+#if REX_PLATFORM_MAC
+  int MapViewsMac();
+#endif
   int MapViews(uint8_t* mapping_base);
   void UnmapViews();
 

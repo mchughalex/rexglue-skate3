@@ -9,28 +9,44 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
-#include <cstdlib>
 #include <filesystem>
 #include <string>
 
 #include <rex/logging.h>
+#include <rex/platform/env.h>
 #include <rex/ui/vulkan/spirv_tools_context.h>
+
+#if REX_PLATFORM_MAC
+#include "vulkan_moltenvk.h"
+#endif
 
 namespace rex {
 namespace ui {
 namespace vulkan {
 
 bool SpirvToolsContext::Initialize(unsigned int spirv_version) {
-  const char* vulkan_sdk_env = std::getenv("VULKAN_SDK");
-  if (!vulkan_sdk_env) {
-    REXLOG_ERROR("SPIRV-Tools: Failed to get the VULKAN_SDK environment variable");
-    Shutdown();
-    return false;
+  std::filesystem::path library_path;
+
+#if REX_PLATFORM_MAC
+  const MacOSVulkanRuntimePaths macos_runtime_paths = DetectMacOSVulkanRuntimePaths();
+  ConfigureMacOSVulkanEnvironment(macos_runtime_paths);
+  library_path = macos_runtime_paths.spirv_tools_library;
+#endif
+
+  if (library_path.empty()) {
+    auto vulkan_sdk_env = rex::platform::env::get("VULKAN_SDK");
+    if (!vulkan_sdk_env.has_value() || vulkan_sdk_env->empty()) {
+      REXLOG_INFO("SPIRV-Tools: No Vulkan SDK found; SPIR-V validation is disabled");
+      Shutdown();
+      return false;
+    }
+    std::filesystem::path vulkan_sdk_path(*vulkan_sdk_env);
+    library_path = vulkan_sdk_path / platform::lib_names::kSpirvToolsSdkPath;
   }
-  std::filesystem::path vulkan_sdk_path(vulkan_sdk_env);
-  auto library_path = vulkan_sdk_path / platform::lib_names::kSpirvToolsSdkPath;
+
   if (!library_.Load(library_path)) {
-    REXLOG_ERROR("SPIRV-Tools: Failed to load {}", library_path.string());
+    REXLOG_INFO("SPIRV-Tools: Failed to load {}; SPIR-V validation is disabled",
+                library_path.string());
     Shutdown();
     return false;
   }

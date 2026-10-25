@@ -51,6 +51,15 @@ struct EmitContext {
   const FunctionGraph& graph;
   uint32_t entryPoint = 0;                      ///< For "xstart" naming
   runtime::ExportResolver* resolver = nullptr;  ///< For import ordinal resolution (nullable)
+
+  /// Every function name emitted as a call. The writer turns this into the
+  /// per-file declaration header, so a missed name is a compile error.
+  std::unordered_set<std::string>* referenced = nullptr;
+
+  void reference(std::string_view name) const {
+    if (referenced)
+      referenced->emplace(name);
+  }
 };
 
 //=============================================================================

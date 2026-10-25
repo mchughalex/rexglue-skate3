@@ -11,6 +11,8 @@
 
 #include <cstdlib>
 
+#include <SDL3/SDL.h>
+
 #include <rex/ui/surface_gnulinux.h>
 
 namespace rex {
@@ -25,6 +27,16 @@ bool XcbWindowSurface::GetSizeImpl(uint32_t& width_out, uint32_t& height_out) co
   width_out = reply->width;
   height_out = reply->height;
   std::free(reply);
+  return true;
+}
+
+bool WaylandSurface::GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const {
+  int w = 0, h = 0;
+  if (!SDL_GetWindowSizeInPixels(sdl_window_, &w, &h) || w <= 0 || h <= 0) {
+    return false;
+  }
+  width_out = uint32_t(w);
+  height_out = uint32_t(h);
   return true;
 }
 

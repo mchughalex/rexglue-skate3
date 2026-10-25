@@ -629,6 +629,7 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     for (auto it = sehInfo->scopes.rbegin(); it != sehInfo->scopes.rend(); ++it) {
       const auto& scope = *it;
       if (scope.filter == 0 && scope.handler != 0) {
+        ctx.reference(fmt::format("{}sub_{:08X}", ctx.config.symbolPrefix, scope.handler));
         emit_println(body, "\t\t\t{}sub_{:08X}(ctx, base);  // __finally handler",
                      ctx.config.symbolPrefix, scope.handler);
       }
@@ -637,6 +638,7 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     if (sehInfo->restoreHelper != 0) {
       auto* restoreFn = ctx.graph.getFunction(sehInfo->restoreHelper);
       if (restoreFn && !restoreFn->name().empty()) {
+        ctx.reference(restoreFn->name());
         emit_println(body, "\t\t\t{}(ctx, base);  // Restore caller registers", restoreFn->name());
       }
     }
@@ -775,7 +777,11 @@ FunctionNode* FunctionGraph::addFunction(uint32_t base, uint32_t size, FunctionA
   functionHasXrefs_[base] = hasXrefs;
 
   // Notify all PENDING functions
-  notifyFunctionAdded(nodePtr);
+  if (deferAddNotifications_) {
+    deferredAddedBases_.push_back(base);
+  } else {
+    notifyFunctionAdded(nodePtr);
+  }
 
   return nodePtr;
 }
@@ -1229,6 +1235,82 @@ bool FunctionGraph::isVacant(uint32_t fromAddr, uint32_t targetAddr) const {
   return true;
 }
 
+size_t FunctionGraph::markFuncletRegisterSharing() {
+  // MSVC compiles __finally / __except bodies as funclets that run on the
+  // owner's frame with its non-volatiles still live, and reaches an inline one
+  // by bl from the middle of the owner. Localizing the funclet's copies hands it
+  // a zero. The scope table names each funclet, which is the only reliable way
+  // to tell one from a real function: every prologue reads its non-volatiles in
+  // order to spill them, so "reads before writes" cannot distinguish them. C++
+  // EH cleanup and catch funclets run the same way, so they are claimed too. The
+  // owner stays localized and syncs across the call site instead, so it keeps
+  // its isolation from its own callers.
+  std::vector<std::pair<uint32_t, uint32_t>> ranges;  // funclet [base, end)
+
+  for (auto& entry : functions_) {
+    auto& node = entry.second;
+    if (!node->hasExceptionInfo())
+      continue;
+
+    auto claim = [&](uint32_t addr) {
+      auto it = addr ? functions_.find(addr) : functions_.end();
+      if (it == functions_.end())
+        return;
+      ranges.emplace_back(it->second->base(), it->second->end());
+    };
+
+    if (const auto* seh = node->exceptionInfo()->asSeh()) {
+      for (const auto& scope : seh->scopes) {
+        claim(scope.handler);
+        claim(scope.filter);
+      }
+    } else if (const auto* cxx = node->exceptionInfo()->asCxx()) {
+      for (const auto& entry : cxx->unwindMap) {
+        claim(entry.action);
+      }
+      for (const auto& tryBlock : cxx->tryBlocks) {
+        for (const auto& handler : tryBlock.handlers) {
+          claim(handler.handlerAddress);
+        }
+      }
+    }
+  }
+
+  if (ranges.empty())
+    return 0;
+
+  std::sort(ranges.begin(), ranges.end());
+  size_t out = 0;
+  for (size_t i = 1; i < ranges.size(); ++i) {
+    if (ranges[i].first <= ranges[out].second) {
+      ranges[out].second = std::max(ranges[out].second, ranges[i].second);
+    } else {
+      ranges[++out] = ranges[i];
+    }
+  }
+  ranges.resize(out + 1);
+
+  auto insideFunclet = [&](uint32_t addr) {
+    auto it = std::upper_bound(
+        ranges.begin(), ranges.end(), addr,
+        [](uint32_t a, const std::pair<uint32_t, uint32_t>& r) { return a < r.first; });
+    return it != ranges.begin() && addr < (--it)->second;
+  };
+
+  // A funclet compiled with both an unwind entry and an inline bl entry lands in
+  // the graph as two nodes sharing one tail. The scope table names only the
+  // first, so sweep the extent for the rest.
+  size_t marked = 0;
+  for (const auto& [base, node] : functions_) {
+    if (insideFunclet(base) && !node->sharesRegisters()) {
+      node->setSharesRegisters(true);
+      ++marked;
+    }
+  }
+
+  return marked;
+}
+
 bool FunctionGraph::isMergeableEntryPoint(uint32_t addr) const {
   // Only entry points can be mergeable
   auto it = functions_.find(addr);
@@ -1297,23 +1379,71 @@ TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
 void FunctionGraph::notifyFunctionAdded(FunctionNode* newFunction) {
   for (auto& [base, node] : functions_) {
     if (node.get() != newFunction && node->isPending()) {
-      auto jumps = node->unresolvedJumps();
-      for (const auto& jump : jumps) {
-        if (jump.target != newFunction->base()) {
-          continue;
-        }
+      resolvePendingAgainst(node.get(), newFunction);
+    }
+  }
+}
 
-        if (!jump.isCall && chunkParent(jump.target) != 0 &&
-            HasEmittedBlockContaining(node.get(), jump.target)) {
-          node->addLabel(jump.target);
-          node->removeUnresolvedJump(jump.site);
-          REXCODEGEN_TRACE(
-              "FunctionGraph: resolved 0x{:08X}->0x{:08X} as emitted chunk label in 0x{:08X}",
-              jump.site, jump.target, node->base());
-        }
+void FunctionGraph::resolvePendingAgainst(FunctionNode* node, FunctionNode* newFunction) {
+  if (!node->hasUnresolvedJumps()) {
+    return;
+  }
+  const uint32_t new_base = newFunction->base();
+  const auto& pending_jumps = node->unresolvedJumps();
+  if (std::none_of(pending_jumps.begin(), pending_jumps.end(),
+                   [new_base](const auto& jump) { return jump.target == new_base; })) {
+    return;
+  }
+  auto jumps = pending_jumps;
+  for (const auto& jump : jumps) {
+    if (jump.target != new_base) {
+      continue;
+    }
+
+    if (!jump.isCall && chunkParent(jump.target) != 0 &&
+        HasEmittedBlockContaining(node, jump.target)) {
+      node->addLabel(jump.target);
+      node->removeUnresolvedJump(jump.site);
+      REXCODEGEN_TRACE(
+          "FunctionGraph: resolved 0x{:08X}->0x{:08X} as emitted chunk label in 0x{:08X}",
+          jump.site, jump.target, node->base());
+    }
+  }
+
+  node->tryResolveAgainst(newFunction);
+}
+
+void FunctionGraph::beginDeferredAddNotifications() {
+  deferAddNotifications_ = true;
+  deferredAddedBases_.clear();
+}
+
+void FunctionGraph::flushDeferredAddNotifications() {
+  deferAddNotifications_ = false;
+  if (deferredAddedBases_.empty()) {
+    return;
+  }
+  std::unordered_set<uint32_t> added(deferredAddedBases_.begin(), deferredAddedBases_.end());
+  deferredAddedBases_.clear();
+
+  std::vector<uint32_t> targets;
+  for (auto& [base, node] : functions_) {
+    if (!node->isPending() || !node->hasUnresolvedJumps()) {
+      continue;
+    }
+    // Targets in jump order, each once, as the per-add path would see them.
+    targets.clear();
+    for (const auto& jump : node->unresolvedJumps()) {
+      if (jump.target != base && added.contains(jump.target) &&
+          std::find(targets.begin(), targets.end(), jump.target) == targets.end()) {
+        targets.push_back(jump.target);
       }
-
-      node->tryResolveAgainst(newFunction);
+    }
+    for (uint32_t target : targets) {
+      auto it = functions_.find(target);
+      if (it != functions_.end()) {
+        resolvePendingAgainst(node.get(), it->second.get());
+      }
     }
   }
 }

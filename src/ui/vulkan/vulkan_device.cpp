@@ -19,6 +19,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
+#include <rex/string.h>
 #include <rex/ui/vulkan/device.h>
 
 REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
@@ -35,17 +36,13 @@ REXCVAR_DEFINE_BOOL(vulkan_require_vertex_pipeline_stores_and_atomics, true, "UI
                     "Deprecated and ignored for parity; vertexPipelineStoresAndAtomics is always "
                     "required for Vulkan GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(vulkan_require_geometry_shader,
-#if REX_PLATFORM_MAC
-                    false,
-#else
-                    true,
-#endif
-                    "UI/Vulkan",
+// Apple Silicon / MoltenVK does not expose geometryShader or fillModeNonSolid;
+// default both to false on macOS so the device can still be selected.
+REXCVAR_DEFINE_BOOL(vulkan_require_geometry_shader, !REX_PLATFORM_MAC, "UI/Vulkan",
                     "Require geometryShader support for Vulkan GPU emulation (disable to allow "
                     "fallback primitive emulation paths)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(vulkan_require_fill_mode_non_solid, true, "UI/Vulkan",
+REXCVAR_DEFINE_BOOL(vulkan_require_fill_mode_non_solid, !REX_PLATFORM_MAC, "UI/Vulkan",
                     "Require fillModeNonSolid support for Vulkan GPU emulation (disable to "
                     "allow fallback to solid fill for line/point polygon modes)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -531,7 +528,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   device->properties_.driverVersion = properties.driverVersion;
   device->properties_.vendorID = properties.vendorID;
   device->properties_.deviceID = properties.deviceID;
-  std::strcpy(device->properties_.deviceName, properties.deviceName);
+  rex::string::copy_truncating(device->properties_.deviceName, properties.deviceName,
+                               sizeof(device->properties_.deviceName));
 
   REXLOG_INFO(
       "Vulkan device '{}': API {}.{}.{}, vendor 0x{:04X}, device 0x{:04X}, "

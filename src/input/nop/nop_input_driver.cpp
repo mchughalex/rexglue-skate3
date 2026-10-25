@@ -17,6 +17,13 @@
 
 namespace rex::input::nop {
 
+namespace {
+
+// A single device, so its handle is a constant.
+constexpr rex::input::DeviceId kNopDevice = static_cast<rex::input::DeviceId>(0x4E4F5000);
+
+}  // namespace
+
 NopInputDriver::NopInputDriver(rex::ui::Window* window, size_t window_z_order)
     : InputDriver(window, window_z_order) {}
 
@@ -29,9 +36,17 @@ X_STATUS NopInputDriver::Setup() {
 // Spoof a connected controller for user 0 so games don't pause
 // waiting for input. Returns idle state (no buttons pressed).
 
-X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
-                                         X_INPUT_CAPABILITIES* out_caps) {
-  if (user_index != 0) {
+void NopInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
+  DeviceInfo info;
+  info.id = kNopDevice;
+  info.name = "None";
+  info.synthetic = true;
+  out.push_back(info);
+}
+
+X_RESULT NopInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
+                                               X_INPUT_CAPABILITIES* out_caps) {
+  if (id != kNopDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   if (out_caps) {
@@ -53,8 +68,8 @@ X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT NopInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
-  if (user_index != 0) {
+X_RESULT NopInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+  if (id != kNopDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   if (out_state) {
@@ -64,17 +79,17 @@ X_RESULT NopInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state)
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT NopInputDriver::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
-  if (user_index != 0) {
+X_RESULT NopInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) {
+  if (id != kNopDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   // Accept vibration but do nothing
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT NopInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
-                                      X_INPUT_KEYSTROKE* out_keystroke) {
-  if (user_index != 0) {
+X_RESULT NopInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+                                            X_INPUT_KEYSTROKE* out_keystroke) {
+  if (id != kNopDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   // No keystrokes available

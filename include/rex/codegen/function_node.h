@@ -141,6 +141,11 @@ class FunctionNode {
 
   void setName(std::string name) { name_ = std::move(name); }
 
+  // This is an SEH funclet: non-volatiles stay in ctx so it sees what its owner
+  // left live, and callers sync their localized copies around the call.
+  bool sharesRegisters() const { return sharesRegisters_; }
+  void setSharesRegisters(bool val) { sharesRegisters_ = val; }
+
  private:
   //=========================================================================
   // Mutation methods - only FunctionGraph can call these
@@ -182,6 +187,7 @@ class FunctionNode {
   FunctionAuthority authority_;
   FunctionState state_ = FunctionState::kRegistered;
   bool hasExceptionHandler_ = false;
+  bool sharesRegisters_ = false;
 
   // Populated at discover()
   std::vector<Block> blocks_;

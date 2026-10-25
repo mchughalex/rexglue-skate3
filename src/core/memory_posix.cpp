@@ -6,7 +6,7 @@
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  *
- * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ * @modified    Tom Clay & Rien Gupta, 2026 - Adapted for ReXGlue runtime (POSIX + macOS)
  */
 
 #include <cerrno>
@@ -14,17 +14,36 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <string>
 
 #include <fcntl.h>
+
+#if REX_PLATFORM_MAC
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <mach/vm_region.h>
+#endif  // REX_PLATFORM_MAC
+
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/memory/utils.h>
 #include <rex/platform.h>
 #include <rex/string.h>
+
+// macOS off_t is 64-bit with no *64 large-file variants; Linux keeps the
+// explicit *64 forms for legacy 32-bit off_t distributions.
+#if defined(__APPLE__)
+#define rex_mmap64 mmap
+#define rex_ftruncate64 ftruncate
+#else
+#define rex_mmap64 mmap64
+#define rex_ftruncate64 ftruncate64
+#endif
 
 #if REX_PLATFORM_ANDROID
 #include <string.h>
@@ -38,40 +57,30 @@
 // #include "xenia/base/main_android.h"
 #endif
 
-#if REX_PLATFORM_MAC
-#define ftruncate64 ftruncate
-#define mmap64 mmap
-#endif
-
 namespace rex {
 namespace memory {
 
-namespace {
-
-#if REX_PLATFORM_MAC
-void AlignHostPageRange(void*& base_address, size_t& length) {
-  const uintptr_t page_mask = uintptr_t(page_size() - 1);
-  const uintptr_t start = reinterpret_cast<uintptr_t>(base_address);
-  const uintptr_t end = start + length;
-  const uintptr_t aligned_start = start & ~page_mask;
-  const uintptr_t aligned_end = (end + page_mask) & ~page_mask;
-  base_address = reinterpret_cast<void*>(aligned_start);
-  length = static_cast<size_t>(aligned_end - aligned_start);
-}
-#endif
-
-}  // namespace
-
-// Convert filesystem path to valid shm_open name (must start with /, no other slashes)
+// Convert a filesystem path to a valid shm_open name (must start with /, no other slashes).
+// macOS enforces a 31-character total limit, so long names are folded from the full path rather
+// than only the filename. This keeps equal filenames in different directories distinct.
 static std::string MakeShmName(const std::filesystem::path& path) {
   std::string name = path.string();
   for (char& c : name) {
-    if (c == '/')
+    if (c == '/') {
       c = '_';
+    }
   }
   if (name.empty() || name[0] != '/') {
     name.insert(name.begin(), '/');
   }
+#if REX_PLATFORM_MAC
+  if (name.size() > 30) {
+    const std::size_t h = std::hash<std::string>{}(name);
+    char hash_buf[24];
+    std::snprintf(hash_buf, sizeof(hash_buf), "/%016zx", h);
+    name = hash_buf;
+  }
+#endif
   return name;
 }
 
@@ -129,6 +138,16 @@ uint32_t ToPosixProtectFlags(PageAccess access) {
       assert_unhandled_case(access);
       return PROT_NONE;
   }
+}
+
+bool IsWritableExecutableMemorySupported() {
+#if REX_PLATFORM_MAC
+  // macOS enforces W^X on Apple Silicon. Shared file mappings cannot be both
+  // writable and executable. The code cache must use separate RW and RX views.
+  return false;
+#else
+  return true;
+#endif
 }
 
 // TODO(tomc): this needs to go somewhere else. we should utilize the platform namespace more.
@@ -243,22 +262,33 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
       break;
   }
 
+    // On macOS, MAP_FIXED_NOREPLACE is unavailable. kCommit on a pre-reserved
+    // range uses mprotect to avoid clobbering the existing reservation. Do not
+    // widen sub-host-page requests here - higher-level guest heaps must reconcile
+    // all guest permissions sharing a host page first.
 #if REX_PLATFORM_MAC
-  if (base_address &&
-      (allocation_type == AllocationType::kCommit ||
-       allocation_type == AllocationType::kReserveCommit)) {
-    void* protect_base = base_address;
-    size_t protect_length = length;
-    AlignHostPageRange(protect_base, protect_length);
-    if (mprotect(protect_base, protect_length, static_cast<int>(prot_requested)) == 0) {
+  if (base_address != nullptr && allocation_type == AllocationType::kCommit) {
+    const size_t host_page = page_size();
+    const uintptr_t address = reinterpret_cast<uintptr_t>(base_address);
+    if ((address % host_page) != 0 || (length % host_page) != 0) {
+      return nullptr;
+    }
+    if (mprotect(base_address, length, static_cast<int>(prot_requested)) == 0) {
       return base_address;
     }
+    return nullptr;
   }
 #endif
 
-  // Build flags - always use MAP_FIXED_NOREPLACE for fixed addresses
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-#if defined(MAP_FIXED_NOREPLACE)
+#if REX_PLATFORM_MAC
+  if (access == PageAccess::kExecuteReadWrite || access == PageAccess::kExecuteReadOnly) {
+    flags |= MAP_JIT;
+  }
+  if (base_address) {
+    flags |= MAP_FIXED;
+  }
+#elif defined(MAP_FIXED_NOREPLACE)
   if (base_address) {
     flags |= MAP_FIXED_NOREPLACE;
   }
@@ -294,9 +324,6 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
   switch (deallocation_type) {
     case DeallocationType::kDecommit: {
       // Decommit: remove access first, then release physical pages
-#if REX_PLATFORM_MAC
-      AlignHostPageRange(base_address, length);
-#endif
       if (mprotect(base_address, length, PROT_NONE) != 0) {
         return false;
       }
@@ -320,7 +347,14 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
     *out_old_access = PageAccess::kNoAccess;
   }
 
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_MAC
+  // mprotect doesn't report the previous protection. Query the Mach region
+  // before changing it so this matches VirtualProtect's out parameter.
+  if (out_old_access) {
+    size_t old_region_length = 0;
+    QueryProtect(base_address, old_region_length, *out_old_access);
+  }
+#elif REX_PLATFORM_LINUX
   // NOTE(tomc): we may want to look at doing this differently. it should work for now
   //             but there is a TOCTOU window between reading and changing.
   //             This really shouldn't be an issue since VirtualProtect on Windows isn't truly
@@ -335,14 +369,50 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
 #endif
 
   uint32_t prot = ToPosixProtectFlags(access);
-#if REX_PLATFORM_MAC
-  AlignHostPageRange(base_address, length);
-#endif
-  return mprotect(base_address, length, prot) == 0;
+  int ret = mprotect(base_address, length, prot);
+  if (ret != 0) {
+    REXSYS_ERROR("mprotect({}, 0x{:X}, {}) failed: {} ({})", base_address, length, prot,
+                 strerror(errno), errno);
+  }
+  return ret == 0;
 }
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
-#if !REX_PLATFORM_LINUX
+#if REX_PLATFORM_MAC
+  mach_vm_address_t address = reinterpret_cast<mach_vm_address_t>(base_address);
+  mach_vm_size_t region_size = 0;
+  vm_region_basic_info_data_64_t info;
+  mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+  mach_port_t object_name;
+
+  kern_return_t kr =
+      mach_vm_region(mach_task_self(), &address, &region_size, VM_REGION_BASIC_INFO_64,
+                     reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+  if (kr != KERN_SUCCESS) {
+    return false;
+  }
+  if (address > reinterpret_cast<mach_vm_address_t>(base_address)) {
+    return false;
+  }
+
+  length = static_cast<size_t>((address + region_size) -
+                               reinterpret_cast<mach_vm_address_t>(base_address));
+
+  if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE)) ==
+      (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE)) {
+    access_out = PageAccess::kExecuteReadWrite;
+  } else if ((info.protection & (VM_PROT_READ | VM_PROT_EXECUTE)) ==
+             (VM_PROT_READ | VM_PROT_EXECUTE)) {
+    access_out = PageAccess::kExecuteReadOnly;
+  } else if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE)) {
+    access_out = PageAccess::kReadWrite;
+  } else if (info.protection & VM_PROT_READ) {
+    access_out = PageAccess::kReadOnly;
+  } else {
+    access_out = PageAccess::kNoAccess;
+  }
+  return true;
+#elif !REX_PLATFORM_LINUX
   access_out = PageAccess::kNoAccess;
   length = 0;
   return false;
@@ -412,11 +482,16 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
   if (ret < 0) {
     return kFileMappingHandleInvalid;
   }
-  if (ftruncate64(ret, static_cast<off_t>(length)) != 0) {
+  if (rex_ftruncate64(ret, static_cast<off_t>(length)) != 0) {
     close(ret);
     shm_unlink(full_path.c_str());
     return kFileMappingHandleInvalid;
   }
+  // Nothing reopens the object by name: unlink it now so the descriptor alone
+  // keeps it alive. Otherwise a crash or kill leaves the whole guest memory
+  // file (4.5 GB) in /dev/shm until reboot, and once tmpfs fills up the next
+  // launch stalls with a black screen.
+  shm_unlink(full_path.c_str());
   return static_cast<FileMappingHandle>(ret);
 #endif
 }
@@ -447,8 +522,8 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
   }
 
   uint32_t prot = ToPosixProtectFlags(access);
-  void* result = mmap64(base_address, length, prot, flags, static_cast<int>(handle),
-                        static_cast<off_t>(file_offset));
+  void* result = rex_mmap64(base_address, length, prot, flags, static_cast<int>(handle),
+                            static_cast<off_t>(file_offset));
   if (result == MAP_FAILED) {
     return nullptr;
   }

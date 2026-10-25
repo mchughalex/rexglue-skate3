@@ -14,6 +14,8 @@
 #include <fmt/format.h>
 
 #include <rex/codegen/analysis_errors.h>
+#include <rex/codegen/config.h>
+#include <rex/codegen/function_types.h>
 #include <rex/logging.h>
 
 #include "codegen_logging.h"
@@ -42,12 +44,59 @@ const CallEdge* findCallEdgeAt(const FunctionNode* node, uint32_t site) {
   return nullptr;
 }
 
+// A config boundary is an assertion the binary cannot make for itself, so one
+// the graph contradicts has to say so: otherwise the author sees a full rebuild
+// change nothing and has no way to tell why. Reported, never fatal. A PDATA
+// entry inside a config extent is the normal MSVC layout for a function with an
+// SEH funclet, so only discovery carving an entry point out of a declared range
+// is worth a warning.
+void validateConfigBoundaries(CodegenContext& ctx) {
+  auto& graph = ctx.graph;
+
+  for (const auto& [addr, fc] : ctx.Config().functions) {
+    if (fc.isChunk())
+      continue;
+
+    const FunctionNode* node = graph.getFunction(addr);
+    if (!node) {
+      REXCODEGEN_WARN("[functions] 0x{:08X} is not a function entry point", addr);
+      continue;
+    }
+    if (node->authority() != FunctionAuthority::CONFIG) {
+      REXCODEGEN_WARN("[functions] 0x{:08X} outranked by {}", addr,
+                      AuthorityName(node->authority()));
+      continue;
+    }
+
+    // The declared size, not node->size(): discover() grows a node to cover its
+    // blocks, and only what the author wrote is a boundary claim.
+    uint32_t declared = fc.getSize(addr);
+    if (declared == 0)
+      continue;
+
+    for (const auto& [otherAddr, other] : graph.functions()) {
+      if (otherAddr <= addr || otherAddr >= addr + declared)
+        continue;
+      auto authority = other->authority();
+      if (authority == FunctionAuthority::PDATA || authority == FunctionAuthority::HELPER) {
+        REXCODEGEN_DEBUG("[functions] 0x{:08X} size 0x{:X} contains {} 0x{:08X}", addr, declared,
+                         AuthorityName(authority), otherAddr);
+        continue;
+      }
+      REXCODEGEN_WARN("[functions] 0x{:08X} size 0x{:X} split by {} entry point 0x{:08X}", addr,
+                      declared, AuthorityName(authority), otherAddr);
+    }
+  }
+}
+
 VoidResult validateGraph(CodegenContext& ctx) {
   REXCODEGEN_TRACE("Analyze: validating call graph...");
 
   auto& graph = ctx.graph;
   auto& binary = ctx.binary();
   auto& errors = ctx.errors;
+
+  validateConfigBoundaries(ctx);
 
   size_t functionsChecked = 0;
   size_t callsChecked = 0;

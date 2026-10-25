@@ -16,14 +16,19 @@ namespace rex {
 namespace ui {
 
 std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
+#if REX_PLATFORM_MAC
+  // The vendored RenderDoc app API header doesn't expose a macOS path.
+  // Keep RenderDoc optional and simply report "not connected" on this platform.
+  return nullptr;
+#else
   std::unique_ptr<RenderDocAPI> renderdoc_api(new RenderDocAPI());
 
   pRENDERDOC_GetAPI get_api = nullptr;
 
-  // Try to load the RenderDoc library. If RenderDoc is attached, the library
-  // should already be loaded into the process and this will increment the
-  // reference count. If not attached, the load will fail and we return nullptr.
-  if (!renderdoc_api->library_.Load(platform::lib_names::kRenderDoc)) {
+  // Only use RenderDoc when it is attached, i.e. its library is already loaded
+  // into the process. A plain load would pull in any librenderdoc installed on
+  // the system (SteamOS ships one) and draw its capture overlay over the game.
+  if (!renderdoc_api->library_.LoadIfAlreadyLoaded(platform::lib_names::kRenderDoc)) {
     return nullptr;
   }
   get_api = renderdoc_api->library_.GetSymbol<pRENDERDOC_GetAPI>("RENDERDOC_GetAPI");
@@ -38,6 +43,7 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
   REXLOG_INFO("RenderDoc API initialized");
 
   return renderdoc_api;
+#endif
 }
 
 RenderDocAPI::~RenderDocAPI() {

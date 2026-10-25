@@ -42,11 +42,17 @@ const FunctionGraph& BuilderContext::graph() const {
 // Register Accessors
 //=============================================================================
 
+// Localizing a non-volatile assumes the function owns it across its whole body.
+// An SEH funclet does not: it inherits its owner's live registers through ctx.
+bool BuilderContext::localizeNonVolatiles() const {
+  return config().nonVolatileRegistersAsLocalVariables && !fn.sharesRegisters();
+}
+
 std::string BuilderContext::r(size_t index) {
   const auto& cfg = config();
   if ((cfg.nonArgumentRegistersAsLocalVariables &&
        (index == 0 || index == 2 || index == 11 || index == 12)) ||
-      (cfg.nonVolatileRegistersAsLocalVariables && index >= 14)) {
+      (localizeNonVolatiles() && index >= 14)) {
     locals.r[index] = true;
     return fmt::format("r{}", index);
   }
@@ -56,7 +62,7 @@ std::string BuilderContext::r(size_t index) {
 std::string BuilderContext::f(size_t index) {
   const auto& cfg = config();
   if ((cfg.nonArgumentRegistersAsLocalVariables && index == 0) ||
-      (cfg.nonVolatileRegistersAsLocalVariables && index >= 14)) {
+      (localizeNonVolatiles() && index >= 14)) {
     locals.f[index] = true;
     return fmt::format("f{}", index);
   }
@@ -66,8 +72,7 @@ std::string BuilderContext::f(size_t index) {
 std::string BuilderContext::v(size_t index) {
   const auto& cfg = config();
   if ((cfg.nonArgumentRegistersAsLocalVariables && (index >= 32 && index <= 63)) ||
-      (cfg.nonVolatileRegistersAsLocalVariables &&
-       ((index >= 14 && index <= 31) || (index >= 64 && index <= 127)))) {
+      (localizeNonVolatiles() && ((index >= 14 && index <= 31) || (index >= 64 && index <= 127)))) {
     locals.v[index] = true;
     return fmt::format("v{}", index);
   }
@@ -193,13 +198,35 @@ void BuilderContext::emit_function_call(uint32_t address) {
       auto* targetFn = target->asFunction();
       const auto& name = targetFn->name();
 
-      // Handle save/restore helpers
+      // Handle save/restore helpers. Gated on the global setting, not this
+      // function's: the helper bodies are emitted under it too, so once they
+      // spill to locals they are no-ops that scribble zeros on the caller's
+      // frame. A share_registers function still has to elide them.
       if (cfg.nonVolatileRegistersAsLocalVariables &&
           (name.find("__rest") != std::string::npos || name.find("__save") != std::string::npos)) {
         // print nothing - these are handled by local variable tracking
         return;
       }
 
+      // An SEH funclet runs on its owner's frame and reads whatever non-volatiles
+      // the owner left live, so hand it the localized copies through ctx and take
+      // them back afterwards. Only registers already localized here can be live at
+      // this point, so that set is the whole live-in the funclet can see.
+      if (targetFn->sharesRegisters() && localizeNonVolatiles()) {
+        for (size_t i = 14; i < 32; ++i) {
+          if (locals.r[i])
+            println("\tctx.r{} = r{};", i, i);
+        }
+        emitCtx.reference(name);
+        println("\t{}(ctx, base);", name);
+        for (size_t i = 14; i < 32; ++i) {
+          if (locals.r[i])
+            println("\tr{} = ctx.r{};", i, i);
+        }
+        return;
+      }
+
+      emitCtx.reference(name);
       println("\t{}(ctx, base);", name);
       return;
     }
@@ -230,6 +257,7 @@ void BuilderContext::emit_function_call(uint32_t address) {
         std::replace(func_name.begin(), func_name.end(), '.', '_');
       }
 
+      emitCtx.reference(func_name);
       println("\t{}(ctx, base);", func_name);
       return;
     }
@@ -273,6 +301,7 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
       if (const auto* callTarget = findCallTarget(base)) {
         if (callTarget->isFunction()) {
           auto* targetFn = callTarget->asFunction();
+          emitCtx.reference(targetFn->name());
           println("\tif ({}{}.{}) {{", not_ ? "!" : "", cr(insn.operands[0]), cond);
           println("\t\t{}(ctx, base);", targetFn->name());
           println("\t\treturn;");
@@ -282,6 +311,7 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
           std::string func_name = "__imp__" + importTarget.name;
           std::replace(func_name.begin(), func_name.end(), '@', '_');
           std::replace(func_name.begin(), func_name.end(), '.', '_');
+          emitCtx.reference(func_name);
           println("\tif ({}{}.{}) {{", not_ ? "!" : "", cr(insn.operands[0]), cond);
           println("\t\t{}(ctx, base);", func_name);
           println("\t\treturn;");

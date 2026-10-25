@@ -72,9 +72,11 @@ void InitLoggingEarly();
 void ShutdownLogging();
 
 /**
- * Flush all loggers without shutting the logging system down. Safe to call
- * while other threads may still be logging; intended for fast-exit paths
- * that end the process with _Exit right after flushing.
+ * Flush all loggers without tearing down the logging system.
+ *
+ * Use before a hard process exit (std::_Exit) when other threads may still be
+ * logging: unlike ShutdownLogging it leaves the registry and sinks intact, so a
+ * concurrent logger cannot hit freed state.
  */
 void FlushLogging();
 

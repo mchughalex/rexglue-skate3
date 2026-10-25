@@ -1,26 +1,25 @@
 # Third-party vendored dependencies for ReXGlue
+include(${PROJECT_SOURCE_DIR}/cmake/rexglue_vulkan_stack.cmake)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
 #=============================================================================
 # Architecture detection
 #=============================================================================
-set(REX_THIRDPARTY_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
-    list(LENGTH CMAKE_OSX_ARCHITECTURES REX_THIRDPARTY_OSX_ARCH_COUNT)
-    if(REX_THIRDPARTY_OSX_ARCH_COUNT EQUAL 1)
-        set(REX_THIRDPARTY_TARGET_PROCESSOR "${CMAKE_OSX_ARCHITECTURES}")
+    # On Apple, CMAKE_OSX_ARCHITECTURES is the target arch; CMAKE_SYSTEM_PROCESSOR
+    # reflects the host (e.g. arm64 on Apple Silicon even when cross-building x86_64).
+    if("arm64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+        set(IS_ARM64 TRUE)
+        set(IS_X86_64 FALSE)
+    else()
+        set(IS_ARM64 FALSE)
+        set(IS_X86_64 TRUE)
     endif()
-endif()
-
-if(APPLE AND NOT REX_THIRDPARTY_TARGET_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
-    message(FATAL_ERROR "Unsupported macOS architecture: ${REX_THIRDPARTY_TARGET_PROCESSOR}. macOS builds are ARM64-only.")
-endif()
-
-if(REX_THIRDPARTY_TARGET_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
     set(IS_ARM64 FALSE)
     set(IS_X86_64 TRUE)
-elseif(REX_THIRDPARTY_TARGET_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|ARM64|arm64)$")
     set(IS_ARM64 TRUE)
     set(IS_X86_64 FALSE)
 else()
@@ -40,7 +39,6 @@ set(REQUIRED_SUBMODULES
     xxHash
     spdlog
     fmt
-    snappy
     utfcpp
     imgui
     sdl3
@@ -48,9 +46,12 @@ set(REQUIRED_SUBMODULES
 
 if(REXGLUE_USE_VULKAN)
     list(APPEND REQUIRED_SUBMODULES
-        volk vulkan-headers vulkan-memory-allocator
+        vulkan-headers vulkan-memory-allocator
         spirv-headers spirv-tools glslang
     )
+    if(APPLE)
+        list(APPEND REQUIRED_SUBMODULES vulkan-loader moltenvk)
+    endif()
 endif()
 
 
@@ -181,15 +182,6 @@ add_subdirectory(spdlog)
 target_compile_options(spdlog PRIVATE -w)
 
 #=============================================================================
-# snappy - Fast compression/decompression (GPU traces)
-#=============================================================================
-set(SNAPPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(SNAPPY_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-set(SNAPPY_INSTALL ON CACHE BOOL "" FORCE)
-add_subdirectory(snappy)
-target_compile_options(snappy PRIVATE -w)
-
-#=============================================================================
 # utfcpp - UTF-8 string library (header-only)
 #=============================================================================
 add_subdirectory(utfcpp)
@@ -198,6 +190,8 @@ add_subdirectory(utfcpp)
 # Vulkan dependencies (only when Vulkan backend is enabled)
 #=============================================================================
 if(REXGLUE_USE_VULKAN)
+    message(STATUS "Vulkan stack: SDK ${REXGLUE_VULKAN_SDK_VERSION}")
+
     # Vulkan-Headers
     set(VULKAN_HEADERS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
     set(VULKAN_HEADERS_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
@@ -208,16 +202,22 @@ if(REXGLUE_USE_VULKAN)
     set(VMA_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
     add_subdirectory(vulkan-memory-allocator)
 
-    # volk
     if(APPLE)
-        set(VOLK_STATIC_DEFINES VK_USE_PLATFORM_METAL_EXT CACHE STRING "" FORCE)
+        # Build the loader and MoltenVK revisions shipped by the pinned SDK.
+        # They remain runtime-loaded; no Vulkan implementation is linked into
+        # rexglue itself.
+        set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(BUILD_WERROR OFF CACHE BOOL "" FORCE)
+        set(LOADER_CODEGEN OFF CACHE BOOL "" FORCE)
+        string(REGEX REPLACE "\\.[0-9]+$" "" VulkanHeaders_VERSION
+            "${REXGLUE_VULKAN_SDK_VERSION}")
+        add_subdirectory(vulkan-loader EXCLUDE_FROM_ALL)
+        set_target_properties(vulkan PROPERTIES EXCLUDE_FROM_ALL FALSE)
+
+        set(MVK_BUILD_SHADER_CONVERTER_TOOL OFF CACHE BOOL "" FORCE)
+        set(MVK_EXCLUDE_SPIRV_TOOLS ON CACHE BOOL "" FORCE)
+        add_subdirectory(moltenvk)
     endif()
-    set(VOLK_INSTALL ON CACHE BOOL "" FORCE)
-    set(VOLK_PULL_IN_VULKAN OFF CACHE BOOL "" FORCE)
-    add_subdirectory(volk)
-    target_link_libraries(volk PUBLIC Vulkan::Headers)
-    target_link_libraries(volk_headers INTERFACE Vulkan::Headers)
-    target_compile_options(volk PRIVATE -w)
 endif()
 
 #=============================================================================
@@ -279,41 +279,49 @@ set(SDL_STATIC ON CACHE BOOL "" FORCE)
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
 
-# Disable unused subsystems
+# Video provides the windowing/event layer; presenters create their own
+# D3D12/Vulkan surfaces from native handles, so SDL_RENDER stays off.
+set(SDL_VIDEO ON CACHE BOOL "" FORCE)
 if(APPLE)
-    set(SDL_VIDEO ON CACHE BOOL "" FORCE)
+    # macOS uses SDL for windowing + Metal/Vulkan surface creation.
+    set(SDL_METAL ON CACHE BOOL "" FORCE)
+    set(SDL_VULKAN ON CACHE BOOL "" FORCE)
 else()
-    set(SDL_VIDEO OFF CACHE BOOL "" FORCE)
+    set(SDL_METAL OFF CACHE BOOL "" FORCE)
+    # Linux picks X11 or Wayland at runtime, so the surface has to come from
+    # whichever driver SDL chose. Windows presenters go straight from the HWND.
+    if(UNIX)
+        set(SDL_VULKAN ON CACHE BOOL "" FORCE)
+    else()
+        set(SDL_VULKAN OFF CACHE BOOL "" FORCE)
+    endif()
 endif()
 set(SDL_RENDER OFF CACHE BOOL "" FORCE)
 set(SDL_HAPTIC OFF CACHE BOOL "" FORCE)
 set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
 set(SDL_POWER OFF CACHE BOOL "" FORCE)
 set(SDL_FILESYSTEM OFF CACHE BOOL "" FORCE)
-set(SDL_LOCALE OFF CACHE BOOL "" FORCE)
+set(SDL_LOCALE ON CACHE BOOL "" FORCE)
 set(SDL_FILE OFF CACHE BOOL "" FORCE)
 set(SDL_MISC OFF CACHE BOOL "" FORCE)
-set(SDL_DIALOG OFF CACHE BOOL "" FORCE)
+set(SDL_DIALOG ON CACHE BOOL "" FORCE)
 set(SDL_TRAY OFF CACHE BOOL "" FORCE)
 set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
 
-# Disable graphics APIs (unused without video)
+# Disable graphics APIs (unused without video) — only on non-Apple
 set(SDL_OPENGL OFF CACHE BOOL "" FORCE)
 set(SDL_OPENGLES OFF CACHE BOOL "" FORCE)
-set(SDL_VULKAN OFF CACHE BOOL "" FORCE)
-if(APPLE)
-    set(SDL_METAL ON CACHE BOOL "" FORCE)
-else()
-    set(SDL_METAL OFF CACHE BOOL "" FORCE)
-endif()
 
 # Disable dummy drivers
 set(SDL_DISKAUDIO OFF CACHE BOOL "" FORCE)
 set(SDL_DUMMYAUDIO OFF CACHE BOOL "" FORCE)
 set(SDL_DUMMYVIDEO OFF CACHE BOOL "" FORCE)
 
-# Linux audio backends
+# Linux video and audio backends. Both video drivers are always built so the
+# one in use stays a runtime choice.
 if(UNIX AND NOT APPLE)
+    set(SDL_X11               ON  CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND           ON  CACHE BOOL "" FORCE)
     set(SDL_ALSA              ON  CACHE BOOL "" FORCE)
     set(SDL_ALSA_SHARED       ON  CACHE BOOL "" FORCE)
     set(SDL_PULSEAUDIO        ON  CACHE BOOL "" FORCE)
@@ -343,13 +351,10 @@ if(REXGLUE_USE_VULKAN)
     set(SPIRV_HEADERS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
     add_subdirectory(spirv-headers)
 
-    # SPIRV-Tools
-    set(SPIRV_SKIP_EXECUTABLES ON CACHE BOOL "" FORCE)
-    set(SPIRV_SKIP_TESTS ON CACHE BOOL "" FORCE)
-    set(SPIRV_WERROR OFF CACHE BOOL "" FORCE)
-    set(SKIP_SPIRV_TOOLS_INSTALL ON CACHE BOOL "" FORCE)
-    add_subdirectory(spirv-tools)
-    target_compile_options(SPIRV-Tools-static PRIVATE -w)
+    add_library(spirv-tools-headers INTERFACE)
+    target_include_directories(spirv-tools-headers SYSTEM INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/spirv-tools/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
     # glslang/SPIRV - SPIR-V code generation for shader translation
     set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
@@ -719,5 +724,10 @@ if(WIN32)
     target_link_libraries(libavcodec PRIVATE bcrypt)
 endif()
 
-# IDE folder organization
-set_target_properties(libavutil libavcodec PROPERTIES FOLDER "FFmpeg")
+# Hidden visibility is required on aarch64. The NEON .S files use ADRP/ADD
+# PC-relative addressing (movrel) for symbols like ff_cos_*, which the linker
+# only accepts against locally bound symbols when emitting a shared object.
+set_target_properties(libavutil libavcodec PROPERTIES
+    C_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+    FOLDER "FFmpeg")

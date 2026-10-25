@@ -101,6 +101,17 @@ REXCVAR_DEFINE_INT32(native_render_force_resolve_readback_min_length, 0, "GPU",
     .range(0, 16 * 1024 * 1024)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_INT32(readback_resolve_force_length, 0, "GPU",
+                     "When > 0, render-to-texture resolves of exactly this unscaled byte "
+                     "length are always read back synchronously into CPU-visible guest "
+                     "memory, even when readback_resolve is disabled. For games that "
+                     "CPU-read one specific render target (Skate 1 photos JPEG-encode the "
+                     "640x360 32bpp target: 983040). Each copy is a synchronous GPU drain, "
+                     "so pick a length no framebuffer-sized resolve shares. 0 disables "
+                     "(default).")
+    .range(0, 16 * 1024 * 1024)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(readback_memexport, false, "GPU",
                     "Enable CPU readback of shader memexport writes for guest memory "
                     "coherency (can reduce correctness issues, but may add GPU/CPU sync cost)")
@@ -159,7 +170,6 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
       kernel_state_(kernel_state),
       graphics_system_(graphics_system),
       register_file_(graphics_system_->register_file()),
-      trace_writer_(graphics_system->memory()->physical_membase()),
       worker_running_(true),
       write_ptr_index_event_(rex::thread::Event::CreateAutoResetEvent(false)),
       write_ptr_index_(0) {
@@ -201,8 +211,6 @@ bool CommandProcessor::Initialize() {
 }
 
 void CommandProcessor::Shutdown() {
-  EndTracing();
-
   worker_running_ = false;
   write_ptr_index_event_->Set();
   worker_thread_->Wait(0, 0, 0, nullptr);
@@ -211,77 +219,6 @@ void CommandProcessor::Shutdown() {
 
 void CommandProcessor::InitializeShaderStorage(const std::filesystem::path& cache_root,
                                                uint32_t title_id, bool blocking) {}
-
-void CommandProcessor::RequestFrameTrace(const std::filesystem::path& root_path) {
-  if (trace_state_ == TraceState::kStreaming) {
-    REXGPU_ERROR("Streaming trace; cannot also trace frame.");
-    return;
-  }
-  if (trace_state_ == TraceState::kSingleFrame) {
-    REXGPU_ERROR("Frame trace already pending; ignoring.");
-    return;
-  }
-  trace_state_ = TraceState::kSingleFrame;
-  trace_frame_path_ = root_path;
-}
-
-void CommandProcessor::BeginTracing(const std::filesystem::path& root_path) {
-  if (trace_state_ == TraceState::kStreaming) {
-    REXGPU_ERROR("Streaming already active; ignoring request.");
-    return;
-  }
-  if (trace_state_ == TraceState::kSingleFrame) {
-    REXGPU_ERROR("Frame trace pending; ignoring streaming request.");
-    return;
-  }
-  // Streaming starts on the next primary buffer execute.
-  trace_state_ = TraceState::kStreaming;
-  trace_stream_path_ = root_path;
-}
-
-void CommandProcessor::EndTracing() {
-  if (!trace_writer_.is_open()) {
-    return;
-  }
-  assert_true(trace_state_ == TraceState::kStreaming);
-  trace_state_ = TraceState::kDisabled;
-  trace_writer_.Close();
-}
-
-void CommandProcessor::RestoreRegisters(uint32_t first_register, const uint32_t* register_values,
-                                        uint32_t register_count, bool execute_callbacks) {
-  if (first_register > RegisterFile::kRegisterCount ||
-      RegisterFile::kRegisterCount - first_register < register_count) {
-    REXGPU_WARN(
-        "CommandProcessor::RestoreRegisters out of bounds (0x{:X} registers "
-        "starting with 0x{:X}, while a total of 0x{:X} registers are stored)",
-        register_count, first_register, RegisterFile::kRegisterCount);
-    if (first_register > RegisterFile::kRegisterCount) {
-      return;
-    }
-    register_count =
-        std::min(uint32_t(RegisterFile::kRegisterCount) - first_register, register_count);
-  }
-  if (execute_callbacks) {
-    for (uint32_t i = 0; i < register_count; ++i) {
-      WriteRegister(first_register + i, register_values[i]);
-    }
-  } else {
-    std::memcpy(register_file_->values + first_register, register_values,
-                sizeof(uint32_t) * register_count);
-  }
-}
-
-void CommandProcessor::RestoreGammaRamp(const reg::DC_LUT_30_COLOR* new_gamma_ramp_256_entry_table,
-                                        const reg::DC_LUT_PWL_DATA* new_gamma_ramp_pwl_rgb,
-                                        uint32_t new_gamma_ramp_rw_component) {
-  std::memcpy(gamma_ramp_256_entry_table_, new_gamma_ramp_256_entry_table,
-              sizeof(reg::DC_LUT_30_COLOR) * 256);
-  std::memcpy(gamma_ramp_pwl_rgb_, new_gamma_ramp_pwl_rgb, sizeof(reg::DC_LUT_PWL_DATA) * 3 * 128);
-  gamma_ramp_rw_component_ = new_gamma_ramp_rw_component;
-  OnGammaRamp256EntryTableValueWritten();
-  OnGammaRampPWLValueWritten();
-}
 
 void CommandProcessor::CallInThread(std::function<void()> fn) {
   if (pending_fns_.empty() && system::XThread::IsInThread(worker_thread_.get())) {
@@ -734,34 +671,13 @@ void CommandProcessor::MakeCoherent() {
   regs_volatile[XE_GPU_REG_COHER_STATUS_HOST] = 0;
 }
 
-void CommandProcessor::PrepareForWait() {
-  trace_writer_.Flush();
-}
+void CommandProcessor::PrepareForWait() {}
 
 void CommandProcessor::ReturnFromWait() {}
 
 uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t write_index) {
   SCOPE_profile_cpu_f("gpu");
   PROFILE_SCOPE_COUNTER(kCpuPrimaryBufferUs);
-
-  // If we have a pending trace stream open it now. That way we ensure we get
-  // all commands.
-  if (!trace_writer_.is_open() && trace_state_ == TraceState::kStreaming) {
-    uint32_t title_id =
-        kernel_state_->GetExecutableModule() ? kernel_state_->GetExecutableModule()->title_id() : 0;
-    auto file_name = fmt::format("{:08X}_stream.xtr", title_id);
-    auto path = trace_stream_path_ / file_name;
-    trace_writer_.Open(path, title_id);
-    InitializeTrace();
-  }
-
-  // Adjust pointer base.
-  uint32_t start_ptr = primary_buffer_ptr_ + read_index * sizeof(uint32_t);
-  start_ptr = (primary_buffer_ptr_ & ~0x1FFFFFFF) | (start_ptr & 0x1FFFFFFF);
-  uint32_t end_ptr = primary_buffer_ptr_ + write_index * sizeof(uint32_t);
-  end_ptr = (primary_buffer_ptr_ & ~0x1FFFFFFF) | (end_ptr & 0x1FFFFFFF);
-
-  trace_writer_.WritePrimaryBufferStart(start_ptr, write_index - read_index);
 
   // Execute commands!
   memory::RingBuffer reader(memory_->TranslatePhysical(primary_buffer_ptr_), primary_buffer_size_);
@@ -778,16 +694,12 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
 
   OnPrimaryBufferEnd();
 
-  trace_writer_.WritePrimaryBufferEnd();
-
   return write_index;
 }
 
 void CommandProcessor::ExecuteIndirectBuffer(uint32_t ptr, uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
   PROFILE_SCOPE_COUNTER(kCpuIndirectBufferUs);
-
-  trace_writer_.WriteIndirectBufferStart(ptr, count * sizeof(uint32_t));
 
   // Execute commands!
   memory::RingBuffer reader(memory_->TranslatePhysical(ptr), count * sizeof(uint32_t));
@@ -800,8 +712,6 @@ void CommandProcessor::ExecuteIndirectBuffer(uint32_t ptr, uint32_t count) {
       break;
     }
   } while (reader.read_count());
-
-  trace_writer_.WriteIndirectBufferEnd();
 }
 
 void CommandProcessor::ExecutePacket(uint32_t ptr, uint32_t count) {
@@ -821,8 +731,6 @@ bool CommandProcessor::ExecutePacket(memory::RingBuffer* reader) {
   const uint32_t packet = reader->ReadAndSwap<uint32_t>();
   const uint32_t packet_type = packet >> 30;
   if (packet == 0) {
-    trace_writer_.WritePacketStart(uint32_t(reader->read_ptr() - 4), 1);
-    trace_writer_.WritePacketEnd();
     return true;
   }
 
@@ -857,8 +765,6 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
     return false;
   }
 
-  trace_writer_.WritePacketStart(uint32_t(reader->read_ptr() - 4), 1 + count);
-
   uint32_t base_index = (packet & 0x7FFF);
   uint32_t write_one_reg = (packet >> 15) & 0x1;
   for (uint32_t m = 0; m < count; m++) {
@@ -867,29 +773,24 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
     WriteRegister(target_index, reg_data);
   }
 
-  trace_writer_.WritePacketEnd();
   return true;
 }
 
 bool CommandProcessor::ExecutePacketType1(memory::RingBuffer* reader, uint32_t packet) {
   // Type-1 packet.
   // Contains two registers of data. Type-0 should be more common.
-  trace_writer_.WritePacketStart(uint32_t(reader->read_ptr() - 4), 3);
   uint32_t reg_index_1 = packet & 0x7FF;
   uint32_t reg_index_2 = (packet >> 11) & 0x7FF;
   uint32_t reg_data_1 = reader->ReadAndSwap<uint32_t>();
   uint32_t reg_data_2 = reader->ReadAndSwap<uint32_t>();
   WriteRegister(reg_index_1, reg_data_1);
   WriteRegister(reg_index_2, reg_data_2);
-  trace_writer_.WritePacketEnd();
   return true;
 }
 
 bool CommandProcessor::ExecutePacketType2(memory::RingBuffer* reader, uint32_t packet) {
   // Type-2 packet.
   // No-op. Do nothing.
-  trace_writer_.WritePacketStart(uint32_t(reader->read_ptr() - 4), 1);
-  trace_writer_.WritePacketEnd();
   return true;
 }
 
@@ -907,13 +808,6 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
 
   current_packet_ptr_ = uint32_t(reader->read_ptr() - 4);
 
-  // To handle nesting behavior when tracing we special case indirect buffers.
-  if (opcode == PM4_INDIRECT_BUFFER) {
-    trace_writer_.WritePacketStart(current_packet_ptr_, 2);
-  } else {
-    trace_writer_.WritePacketStart(current_packet_ptr_, 1 + count);
-  }
-
   // & 1 == predicate - when set, we do bin check to see if we should execute
   // the packet. Only type 3 packets are affected.
   // We also skip predicated swaps, as they are never valid (probably?).
@@ -921,7 +815,6 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
     bool any_pass = (bin_select_ & bin_mask_) != 0;
     if (!any_pass || opcode == PM4_XE_SWAP) {
       reader->AdvanceRead(count * sizeof(uint32_t));
-      trace_writer_.WritePacketEnd();
       return true;
     }
   }
@@ -1058,26 +951,6 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
       assert_always();
       reader->AdvanceRead(count * sizeof(uint32_t));
       break;
-  }
-
-  trace_writer_.WritePacketEnd();
-  if (opcode == PM4_XE_SWAP) {
-    // End the trace writer frame.
-    if (trace_writer_.is_open()) {
-      trace_writer_.WriteEvent(EventCommand::Type::kSwap);
-      trace_writer_.Flush();
-      if (trace_state_ == TraceState::kSingleFrame) {
-        trace_state_ = TraceState::kDisabled;
-        trace_writer_.Close();
-      }
-    } else if (trace_state_ == TraceState::kSingleFrame) {
-      // New trace request - we only start tracing at the beginning of a frame.
-      uint32_t title_id = kernel_state_->GetExecutableModule()->title_id();
-      auto file_name = fmt::format("{:08X}_{}.xtr", title_id, counter_ - 1);
-      auto path = trace_frame_path_ / file_name;
-      trace_writer_.Open(path, title_id);
-      InitializeTrace();
-    }
   }
 
   assert_true(reader->read_offset() ==
@@ -1281,7 +1154,6 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
     if (is_memory) {
       value =
           *reinterpret_cast<uint32_t*>(memory_->TranslatePhysical(poll_reg_addr & ~uint32_t(0x3)));
-      trace_writer_.WriteMemoryRead(CpuToGpu(poll_reg_addr & ~uint32_t(0x3)), sizeof(uint32_t));
       value = xenos::GpuSwap(value, static_cast<xenos::Endian>(poll_reg_addr & 0x3));
     } else {
       value = ReadRegisterValue(poll_reg_addr);
@@ -1384,7 +1256,6 @@ bool CommandProcessor::ExecutePacketType3_REG_TO_MEM(memory::RingBuffer* reader,
   mem_addr &= ~0x3;
   reg_val = GpuSwap(reg_val, endianness);
   memory::store(memory_->TranslatePhysical(mem_addr), reg_val);
-  trace_writer_.WriteMemoryWrite(CpuToGpu(mem_addr), 4);
 
   return true;
 }
@@ -1399,7 +1270,6 @@ bool CommandProcessor::ExecutePacketType3_MEM_WRITE(memory::RingBuffer* reader, 
     auto addr = write_addr & ~0x3;
     write_data = GpuSwap(write_data, endianness);
     memory::store(memory_->TranslatePhysical(addr), write_data);
-    trace_writer_.WriteMemoryWrite(CpuToGpu(addr), 4);
     write_addr += 4;
   }
 
@@ -1420,7 +1290,6 @@ bool CommandProcessor::ExecutePacketType3_COND_WRITE(memory::RingBuffer* reader,
     // Memory.
     auto endianness = static_cast<xenos::Endian>(poll_reg_addr & 0x3);
     poll_reg_addr &= ~0x3;
-    trace_writer_.WriteMemoryRead(CpuToGpu(poll_reg_addr), 4);
     value = memory::load<uint32_t>(memory_->TranslatePhysical(poll_reg_addr));
     value = GpuSwap(value, endianness);
   } else {
@@ -1462,7 +1331,6 @@ bool CommandProcessor::ExecutePacketType3_COND_WRITE(memory::RingBuffer* reader,
       write_reg_addr &= ~0x3;
       write_data = GpuSwap(write_data, endianness);
       memory::store(memory_->TranslatePhysical(write_reg_addr), write_data);
-      trace_writer_.WriteMemoryWrite(CpuToGpu(write_reg_addr), 4);
     } else {
       // Register.
       WriteRegister(write_reg_addr, write_data);
@@ -1508,7 +1376,6 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* re
   address &= ~0x3;
   data_value = GpuSwap(data_value, endianness);
   memory::store(memory_->TranslatePhysical(address), data_value);
-  trace_writer_.WriteMemoryWrite(CpuToGpu(address), 4);
   return true;
 }
 
@@ -1537,7 +1404,6 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
   assert_true(endianness == xenos::Endian::k8in16);
   memory::copy_and_swap_16_unaligned(memory_->TranslatePhysical(address), extents,
                                      rex::countof(extents));
-  trace_writer_.WriteMemoryWrite(CpuToGpu(address), sizeof(extents));
   return true;
 }
 
@@ -1563,10 +1429,10 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
     // 0xFFFFFEED is written to this two locations by D3D only on D3DISSUE_END
     // and used to detect a finished query.
     bool is_end_via_z_pass =
-        pSampleCounts->ZPass_A == kQueryFinished && pSampleCounts->ZPass_B == kQueryFinished;
+        pSampleCounts->ZPass_A == kQueryFinished || pSampleCounts->ZPass_B == kQueryFinished;
     // Older versions of D3D also checks for ZFail (4D5307D5).
     bool is_end_via_z_fail =
-        pSampleCounts->ZFail_A == kQueryFinished && pSampleCounts->ZFail_B == kQueryFinished;
+        pSampleCounts->ZFail_A == kQueryFinished || pSampleCounts->ZFail_B == kQueryFinished;
     std::memset(pSampleCounts, 0, sizeof(xe_gpu_depth_sample_counts));
     if (is_end_via_z_pass || is_end_via_z_fail) {
       pSampleCounts->ZPass_A = fake_sample_count;
@@ -1778,23 +1644,18 @@ bool CommandProcessor::ExecutePacketType3_LOAD_ALU_CONSTANT(memory::RingBuffer* 
   uint32_t* xlat_address = memory_->TranslatePhysical<uint32_t*>(address);
   switch (type) {
     case 0:  // ALU
-      trace_writer_.WriteMemoryRead(CpuToGpu(address), size_dwords * 4);
       WriteALURangeFromMem(index, xlat_address, size_dwords);
       break;
     case 1:  // FETCH
-      trace_writer_.WriteMemoryRead(CpuToGpu(address), size_dwords * 4);
       WriteFetchRangeFromMem(index, xlat_address, size_dwords);
       break;
     case 2:  // BOOL
-      trace_writer_.WriteMemoryRead(CpuToGpu(address), size_dwords * 4);
       WriteBoolRangeFromMem(index, xlat_address, size_dwords);
       break;
     case 3:  // LOOP
-      trace_writer_.WriteMemoryRead(CpuToGpu(address), size_dwords * 4);
       WriteLoopRangeFromMem(index, xlat_address, size_dwords);
       break;
     case 4:  // REGISTERS
-      trace_writer_.WriteMemoryRead(CpuToGpu(address), size_dwords * 4);
       WriteREGISTERSRangeFromMem(index, xlat_address, size_dwords);
       break;
     default:
@@ -1825,7 +1686,6 @@ bool CommandProcessor::ExecutePacketType3_IM_LOAD(memory::RingBuffer* reader, ui
   uint32_t size_dwords = start_size & 0xFFFF;  // dwords
   assert_true(start == 0);
 
-  trace_writer_.WriteMemoryRead(CpuToGpu(addr), size_dwords * 4);
   auto shader =
       LoadShader(shader_type, addr, memory_->TranslatePhysical<uint32_t*>(addr), size_dwords);
   switch (shader_type) {
@@ -1911,16 +1771,6 @@ bool CommandProcessor::ExecutePacketType3_VIZ_QUERY(memory::RingBuffer* reader, 
   }
 
   return true;
-}
-
-void CommandProcessor::InitializeTrace() {
-  // Write the initial register values, to be loaded directly into the
-  // RegisterFile since all registers, including those that may have side
-  // effects on setting, will be saved.
-  trace_writer_.WriteRegisters(0, register_file_->values, RegisterFile::kRegisterCount, false);
-
-  trace_writer_.WriteGammaRamp(gamma_ramp_256_entry_table(), gamma_ramp_pwl_rgb(),
-                               gamma_ramp_rw_component_);
 }
 
 }  // namespace rex::graphics

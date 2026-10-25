@@ -18,7 +18,6 @@ struct CliContext {
   bool verbose = false;
   bool overwrite_existing = false;
   bool generate_despite_errors = false;
-  bool skip_upgrade_consent = false;
 };
 
 using DeferredAction = std::function<rex::Result<void>()>;

@@ -17,6 +17,17 @@ add_library(rexfilesystem OBJECT
 )
 add_library(rex::filesystem ALIAS rexfilesystem)
 
+rex_target_pch(rexfilesystem
+    <mutex>
+    <rex/math.h>
+    <rex/string.h>
+    <rex/memory.h>
+    <rex/filesystem.h>
+    <rex/thread/mutex.h>
+    <rex/system/xtypes.h>
+    <rex/system/xmemory.h>
+)
+
 target_link_libraries(rexfilesystem PUBLIC rexcore)
 target_include_directories(rexfilesystem PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>

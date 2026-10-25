@@ -59,6 +59,10 @@ class VulkanInstance {
 #ifdef VK_USE_PLATFORM_XCB_KHR
 #include <rex/ui/vulkan/functions/instance_khr_xcb_surface.inc>
 #endif
+    // VK_KHR_wayland_surface (#7)
+#ifdef VK_USE_PLATFORM_WAYLAND_KHR
+#include <rex/ui/vulkan/functions/instance_khr_wayland_surface.inc>
+#endif
     // VK_KHR_android_surface (#9)
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
 #include <rex/ui/vulkan/functions/instance_khr_android_surface.inc>
@@ -67,7 +71,7 @@ class VulkanInstance {
 #ifdef VK_USE_PLATFORM_WIN32_KHR
 #include <rex/ui/vulkan/functions/instance_khr_win32_surface.inc>
 #endif
-    // VK_EXT_metal_surface (#218)
+    // VK_EXT_metal_surface (#217)
 #ifdef VK_USE_PLATFORM_METAL_EXT
 #include <rex/ui/vulkan/functions/instance_ext_metal_surface.inc>
 #endif
@@ -90,6 +94,9 @@ class VulkanInstance {
 #ifdef VK_USE_PLATFORM_XCB_KHR
     bool ext_KHR_xcb_surface = false;  // #6
 #endif
+#ifdef VK_USE_PLATFORM_WAYLAND_KHR
+    bool ext_KHR_wayland_surface = false;  // #7
+#endif
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
     bool ext_KHR_android_surface = false;  // #9
 #endif
@@ -97,7 +104,7 @@ class VulkanInstance {
     bool ext_KHR_win32_surface = false;  // #10
 #endif
 #ifdef VK_USE_PLATFORM_METAL_EXT
-    bool ext_EXT_metal_surface = false;  // #218
+    bool ext_EXT_metal_surface = false;  // #217
 #endif
     bool ext_1_1_KHR_get_physical_device_properties2 = false;  // #60
     bool ext_EXT_debug_utils = false;                          // #129

@@ -25,6 +25,13 @@ struct ProjectRecompilerOptions {
   bool force = false;
   bool enableExceptionHandlers = false;
   ProgressReporter* reporter = nullptr;
+
+  /// Bypass the stamp gate and regenerate every targeted module.
+  bool ignoreStamp = false;
+
+  /// Folded into the input fingerprint. Must be stable across commits
+  /// ("0.10.0-dev") or every SDK rebuild forces a full re-analysis.
+  std::string sdkVersion;
 };
 
 class ProjectRecompiler {
@@ -44,10 +51,18 @@ class ProjectRecompiler {
    */
   const std::vector<std::string>& writtenFiles() const { return writtenFiles_; }
 
+  /// Basenames already up to date across all modules in the last Run().
+  const std::vector<std::string>& unchangedFiles() const { return unchangedFiles_; }
+
+  /// Targets skipped in the last Run() because their stamp still matched.
+  const std::vector<std::string>& skippedModules() const { return skippedModules_; }
+
  private:
   ManifestConfig manifest_;
   std::vector<std::string> deletedFiles_;
   std::vector<std::string> writtenFiles_;
+  std::vector<std::string> unchangedFiles_;
+  std::vector<std::string> skippedModules_;
 };
 
 }  // namespace rex::codegen

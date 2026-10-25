@@ -18,6 +18,7 @@
 #include <rex/logging.h>
 #include <rex/perf/counter.h>
 #include <rex/memory.h>
+#include <rex/memory/utils.h>
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
@@ -34,9 +35,23 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
 
 }  // namespace
 
-static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
-  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
-            ctx.last_indirect_target);
+static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* base) {
+  // Skate2Port: walk the guest back chain (saved LR sits 8 bytes below each
+  // caller frame) so crashes can be traced to their call sites.
+  REXSYS_ERROR("Unregistered call to 0x{:08X} (lr=0x{:08X}), guest backtrace:",
+               ctx.last_indirect_target, static_cast<uint32_t>(ctx.lr));
+  uint32_t sp = ctx.r1.u32;
+  for (int depth = 0; depth < 16 && sp; ++depth) {
+    uint32_t caller_sp = rex::memory::load_and_swap<uint32_t>(base + sp);
+    if (!caller_sp || caller_sp <= sp) break;
+    uint32_t saved_lr = rex::memory::load_and_swap<uint32_t>(base + caller_sp - 8);
+    REXSYS_ERROR("  guest frame {}: sp=0x{:08X} lr=0x{:08X}", depth, caller_sp, saved_lr);
+    if (!saved_lr) break;  // thread entry: the next frame is unmapped
+    sp = caller_sp;
+  }
+  // Skate2Port: include the caller's return address to locate the call site.
+  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X} (lr=0x{:08X})",
+            ctx.last_indirect_target, static_cast<uint32_t>(ctx.lr));
 }
 
 PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
@@ -125,6 +140,18 @@ uint64_t FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address
     return 0xDEADBABE;
   }
   return ctx->r3.u64;
+}
+
+uint64_t FunctionDispatcher::ExecuteTrap(ThreadState* thread_state, uint32_t address,
+                                         uint64_t args[], size_t arg_count) {
+  auto* ctx = thread_state->context();
+  PPCContext saved = *ctx;
+
+  uint64_t result = Execute(thread_state, address, args, arg_count);
+
+  *ctx = saved;
+  ctx->fpscr.restoreGuestBits(saved.fpscr.csr);
+  return result;
 }
 
 uint64_t FunctionDispatcher::ExecuteInterrupt(ThreadState* thread_state, uint32_t address,

@@ -93,8 +93,8 @@ bool ReXHeap::Init(uint32_t heap_size_bytes, rex::memory::Memory* memory) {
   }
 
   const auto diagnostics = GetDiagnosticsLocked();
-  REXKRNL_INFO("rexcrt_heap: initialized with {} segment(s), capacity={}MB", segments_.size(),
-               diagnostics.capacity / (1024 * 1024));
+  REXKRNL_DEBUG("rexcrt_heap: initialized with {} segment(s), capacity={}MB", segments_.size(),
+                diagnostics.capacity / (1024 * 1024));
   return true;
 }
 
@@ -229,8 +229,8 @@ bool ReXHeap::AllocateSegmentLocked(uint32_t segment_size_bytes) {
 
   segments_.push_back(
       HeapSegment{heap, guest_base, static_cast<uint32_t>(guest_base + segment_size_bytes)});
-  REXKRNL_INFO("rexcrt_heap: added segment guest=0x{:08X}-0x{:08X} size={}MB", guest_base,
-               guest_base + segment_size_bytes, segment_size_bytes / (1024 * 1024));
+  REXKRNL_DEBUG("rexcrt_heap: added segment guest=0x{:08X}-0x{:08X} size={}MB", guest_base,
+                guest_base + segment_size_bytes, segment_size_bytes / (1024 * 1024));
   return true;
 }
 

@@ -21,17 +21,18 @@ class NopInputDriver final : public InputDriver {
 
   X_STATUS Setup() override;
 
-  X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
-                           X_INPUT_CAPABILITIES* out_caps) override;
-  X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state) override;
+  void EnumerateDevices(std::vector<DeviceInfo>& out) override;
+  X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
   // The spoofed always-connected pad exists only so the guest doesn't pause;
   // it must not read as a real pad to host UI overlays.
-  X_RESULT GetStateUi(uint32_t, X_INPUT_STATE*) override {
+  X_RESULT GetDeviceStateUi(DeviceId, X_INPUT_STATE*) override {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
-  X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) override;
-  X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
-                        X_INPUT_KEYSTROKE* out_keystroke) override;
+  X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
+                                 X_INPUT_CAPABILITIES* out_caps) override;
+  X_RESULT SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) override;
+  X_RESULT GetDeviceKeystroke(DeviceId id, uint32_t flags,
+                              X_INPUT_KEYSTROKE* out_keystroke) override;
 };
 
 }  // namespace rex::input::nop

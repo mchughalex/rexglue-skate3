@@ -21,6 +21,48 @@
 #include <rex/ui/virtual_key.h>
 #include <xinput.h>  // NOLINT(build/include_order)
 
+namespace {
+
+constexpr uint32_t kXinputSlotCount = 4;
+
+// XInput has four fixed native slots, so the slot index rides inside the handle
+// and the per-slot bookkeeping below stays keyed by it.
+constexpr rex::input::DeviceId DeviceForSlot(uint32_t slot) {
+  return static_cast<rex::input::DeviceId>(0x58490000ull | slot);
+}
+
+bool SlotForDevice(rex::input::DeviceId id, uint32_t* out_slot) {
+  const uint64_t raw = static_cast<uint64_t>(id);
+  if ((raw & ~0xFFull) != 0x58490000ull || (raw & 0xFF) >= kXinputSlotCount) {
+    return false;
+  }
+  *out_slot = static_cast<uint32_t>(raw & 0xFF);
+  return true;
+}
+
+// Querying an empty slot costs milliseconds, so back off after a miss.
+constexpr uint64_t SKIP_INVALID_CONTROLLER_TIME = 1100;
+uint64_t last_invalid_time[kXinputSlotCount];
+
+DWORD should_skip(uint32_t user_index) {
+  uint64_t time = last_invalid_time[user_index];
+  if (time) {
+    uint64_t deltatime = rex::chrono::Clock::QueryHostUptimeMillis() - time;
+
+    if (deltatime < SKIP_INVALID_CONTROLLER_TIME) {
+      return ERROR_DEVICE_NOT_CONNECTED;
+    }
+    last_invalid_time[user_index] = 0;
+  }
+  return 0;
+}
+
+void set_skip(uint32_t user_index) {
+  last_invalid_time[user_index] = rex::chrono::Clock::QueryHostUptimeMillis();
+}
+
+}  // namespace
+
 namespace rex::input::xinput {
 
 XinputInputDriver::XinputInputDriver(rex::ui::Window* window, size_t window_z_order)
@@ -83,28 +125,37 @@ X_STATUS XinputInputDriver::Setup() {
   return X_STATUS_SUCCESS;
 }
 
-constexpr uint64_t SKIP_INVALID_CONTROLLER_TIME = 1100;
-static uint64_t last_invalid_time[4];
-
-static DWORD should_skip(uint32_t user_index) {
-  uint64_t time = last_invalid_time[user_index];
-  if (time) {
-    uint64_t deltatime = rex::chrono::Clock::QueryHostUptimeMillis() - time;
-
-    if (deltatime < SKIP_INVALID_CONTROLLER_TIME) {
-      return ERROR_DEVICE_NOT_CONNECTED;
-    }
-    last_invalid_time[user_index] = 0;
+void XinputInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
+  auto xigc = (decltype(&XInputGetCapabilities))XInputGetCapabilities_;
+  if (!xigc) {
+    return;
   }
-  return 0;
+  for (uint32_t slot = 0; slot < kXinputSlotCount; slot++) {
+    if (should_skip(slot)) {
+      continue;
+    }
+    XINPUT_CAPABILITIES native_caps;
+    DWORD result = xigc(slot, 0, &native_caps);
+    if (result) {
+      if (result == ERROR_DEVICE_NOT_CONNECTED) {
+        set_skip(slot);
+      }
+      continue;
+    }
+    DeviceInfo info;
+    info.id = DeviceForSlot(slot);
+    info.name = "XInput Controller";
+    info.synthetic = false;
+    out.push_back(info);
+  }
 }
 
-static void set_skip(uint32_t user_index) {
-  last_invalid_time[user_index] = rex::chrono::Clock::QueryHostUptimeMillis();
-}
-
-X_RESULT XinputInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
-                                            X_INPUT_CAPABILITIES* out_caps) {
+X_RESULT XinputInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
+                                                  X_INPUT_CAPABILITIES* out_caps) {
+  uint32_t user_index = 0;
+  if (!SlotForDevice(id, &user_index)) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
   DWORD skipper = should_skip(user_index);
   if (skipper) {
     return skipper;
@@ -135,7 +186,11 @@ X_RESULT XinputInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
   return result;
 }
 
-X_RESULT XinputInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+X_RESULT XinputInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+  uint32_t user_index = 0;
+  if (!SlotForDevice(id, &user_index)) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
   DWORD skipper = should_skip(user_index);
   if (skipper) {
     return skipper;
@@ -172,7 +227,11 @@ X_RESULT XinputInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_sta
   return result;
 }
 
-X_RESULT XinputInputDriver::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
+X_RESULT XinputInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) {
+  uint32_t user_index = 0;
+  if (!SlotForDevice(id, &user_index)) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
   DWORD skipper = should_skip(user_index);
   if (skipper) {
     return skipper;
@@ -188,32 +247,31 @@ X_RESULT XinputInputDriver::SetState(uint32_t user_index, X_INPUT_VIBRATION* vib
   return result;
 }
 
-X_RESULT XinputInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
-                                         X_INPUT_KEYSTROKE* out_keystroke) {
-  // We may want to filter flags/user_index before sending to native.
+X_RESULT XinputInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+                                               X_INPUT_KEYSTROKE* out_keystroke) {
+  // We may want to filter flags before sending to native.
   // flags is reserved on desktop.
-  DWORD result;
-  bool user_any = users == 0xFF;
+  uint32_t user_index = 0;
+  if (!SlotForDevice(id, &user_index)) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
   // XInputGetKeystroke on Windows has a bug where it will return
   // ERROR_SUCCESS (0) even if the device is not connected:
   // https://stackoverflow.com/questions/23669238/xinputgetkeystroke-returning-error-success-while-controller-is-unplugged
   //
   // So we first check if the device is connected via XInputGetCapabilities, so
   // we are not passing back an uninitialized X_INPUT_KEYSTROKE structure.
-  // If any user (0xFF) is polled this bug does not occur but GetCapabilities
-  // would fail so we need to skip it.
-  if (!user_any) {
-    XINPUT_CAPABILITIES caps;
-    auto xigc = (decltype(&XInputGetCapabilities))XInputGetCapabilities_;
-    result = xigc(users, 0, &caps);
-    if (result) {
-      return result;
-    }
+  XINPUT_CAPABILITIES caps;
+  auto xigc = (decltype(&XInputGetCapabilities))XInputGetCapabilities_;
+  DWORD result = xigc(user_index, 0, &caps);
+  if (result) {
+    return result;
   }
 
   XINPUT_KEYSTROKE native_keystroke;
   auto xigk = (decltype(&XInputGetKeystroke))XInputGetKeystroke_;
-  result = xigk(users, 0, &native_keystroke);
+  result = xigk(user_index, 0, &native_keystroke);
   if (result) {
     return result;
   }

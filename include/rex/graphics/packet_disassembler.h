@@ -13,8 +13,6 @@
 #include <vector>
 
 #include <rex/graphics/register_file.h>
-#include <rex/graphics/trace_protocol.h>
-#include <rex/graphics/trace_reader.h>
 #include <rex/memory.h>
 
 namespace rex::graphics {

@@ -13,23 +13,25 @@
 #include "codegen_flags.h"
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <fmt/format.h>
 #include <inja/inja.hpp>
 
 #include <rex/codegen/function_graph.h>
+#include <rex/codegen/output_partition.h>
 #include <rex/codegen/template_registry.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/system/export_resolver.h>
 
 #include "codegen_logging.h"
+#include "file_io.h"
 #include "template_registry_internal.h"
-
-#include <xxhash.h>
 
 namespace {
 
@@ -109,6 +111,29 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
 
 namespace rex::codegen {
 
+bool IsGeneratedOutputName(std::string_view filename, std::string_view projectName) {
+  auto dot = filename.rfind('.');
+  if (dot == std::string_view::npos)
+    return false;
+  auto ext = filename.substr(dot);
+  if (ext != ".cpp" && ext != ".h" && ext != ".cmake")
+    return false;
+
+  if (filename == "sources.cmake")
+    return true;
+
+  constexpr std::array<std::string_view, 4> kPrefixes{"ppc_recomp", "ppc_func_mapping",
+                                                      "function_table_init", "ppc_config"};
+  for (auto prefix : kPrefixes) {
+    if (filename.starts_with(prefix))
+      return true;
+  }
+
+  std::string projectPrefix(projectName);
+  projectPrefix += '_';
+  return filename.starts_with(projectPrefix);
+}
+
 constexpr size_t kOutputBufferReserveSize = 32 * 1024 * 1024;  // 32 MB
 
 CodegenWriter::CodegenWriter(CodegenContext& ctx, Runtime* runtime)
@@ -138,6 +163,10 @@ const AnalysisState& CodegenWriter::analysisState() const {
 }
 
 bool CodegenWriter::write(bool force) {
+  deletedFiles_.clear();
+  writtenFiles_.clear();
+  unchangedFiles_.clear();
+
   // --- Validation gate (from recompile.cpp) ---
   if (ctx_.errors.HasErrors() && !force) {
     REXCODEGEN_ERROR("Code generation blocked: {} validation errors. Use --force to override.",
@@ -149,21 +178,6 @@ bool CodegenWriter::write(bool force) {
   std::filesystem::path outputPath = ctx_.configDir() / config().outDirectoryPath;
   REXCODEGEN_TRACE("Output path: {}", outputPath.string());
   std::filesystem::create_directories(outputPath);
-
-  // --- Clean old generated files (from recompile.cpp) ---
-  std::string prefix = config().projectName + "_";
-  for (const auto& entry : std::filesystem::directory_iterator(outputPath)) {
-    auto ext = entry.path().extension();
-    if (ext == ".cpp" || ext == ".h" || ext == ".cmake") {
-      std::string filename = entry.path().filename().string();
-      if (filename == "sources.cmake" || filename.starts_with(prefix) ||
-          filename.starts_with("ppc_recomp") || filename.starts_with("ppc_func_mapping") ||
-          filename.starts_with("function_table_init") || filename.starts_with("ppc_config")) {
-        deletedFiles_.push_back(filename);
-        std::filesystem::remove(entry.path());
-      }
-    }
-  }
 
   // --- Everything below from recompiler.cpp recompile() ---
   REXCODEGEN_TRACE("Recompile: starting");
@@ -196,7 +210,17 @@ bool CodegenWriter::write(bool force) {
 
   auto tmplData = buildTemplateData(ctx_, functions, rexcrtByAddr);
 
-  // Generate {project}_init.h (self-contained: config + declarations + macros)
+  // Generate {project}_pch.h (config + macros, stable enough to precompile)
+  REXCODEGEN_TRACE("Recompile: generating {}_pch.h", projectName);
+  out = renderWithJson(registry, "codegen/pch_h", tmplData);
+  SaveCurrentOutData(fmt::format("{}_pch.h", projectName));
+
+  // Generate {project}_funcs.h (every guest function declaration)
+  REXCODEGEN_TRACE("Recompile: generating {}_funcs.h", projectName);
+  out = renderWithJson(registry, "codegen/funcs_h", tmplData);
+  SaveCurrentOutData(fmt::format("{}_funcs.h", projectName));
+
+  // Generate {project}_init.h (the full surface, for init.cpp and consumers)
   REXCODEGEN_TRACE("Recompile: generating {}_init.h", projectName);
   out = renderWithJson(registry, "codegen/init_h", tmplData);
   SaveCurrentOutData(fmt::format("{}_init.h", projectName));
@@ -226,30 +250,60 @@ bool CodegenWriter::write(bool force) {
   if (runtime_)
     emitCtx.resolver = runtime_->export_resolver();
 
-  // Generate recomp files with size-based splitting
   REXCODEGEN_TRACE("Recompiling {} functions...", functions.size());
-  size_t currentFileBytes = 0;
-  println("#include \"{}_init.h\"\n", projectName);
 
-  for (size_t i = 0; i < functions.size(); i++) {
-    std::string code = functions[i]->emitCpp(emitCtx);
+  std::vector<std::string> bodies;
+  std::vector<FunctionSize> sizes;
+  std::vector<std::unordered_set<std::string>> references;
+  bodies.reserve(functions.size());
+  sizes.reserve(functions.size());
+  references.reserve(functions.size());
 
-    if (currentFileBytes > 0 && currentFileBytes + code.size() > REXCVAR_GET(max_file_size_bytes)) {
-      SaveCurrentOutData();
-      println("#include \"{}_init.h\"\n", projectName);
-      currentFileBytes = 0;
+  const size_t maxFileBytes = REXCVAR_GET(max_file_size_bytes);
+  std::unordered_set<std::string> referenced;
+  emitCtx.referenced = &referenced;
+  for (const auto* fn : functions) {
+    referenced.clear();
+    std::string code = fn->emitCpp(emitCtx);
+    if (code.size() > maxFileBytes) {
+      REXCODEGEN_WARN("Function 0x{:08X} is {} bytes, exceeds max_file_size_bytes ({})", fn->base(),
+                      code.size(), maxFileBytes);
+    }
+    sizes.push_back({static_cast<uint32_t>(fn->base()), code.size()});
+    bodies.push_back(std::move(code));
+    references.push_back(referenced);
+  }
+  emitCtx.referenced = nullptr;
+
+  auto partition = OutputPartition::Load(outputPath / kPartitionFileName);
+  auto buckets = partition.Assign(sizes, maxFileBytes);
+
+  for (size_t index = 0; index < buckets.size(); ++index) {
+    // Buckets are address-ordered, so a call can precede its definition.
+    std::unordered_set<std::string> needed;
+    for (size_t entry : buckets[index]) {
+      needed.insert(references[entry].begin(), references[entry].end());
     }
 
-    if (code.size() > REXCVAR_GET(max_file_size_bytes)) {
-      REXCODEGEN_WARN("Function 0x{:08X} is {} bytes, exceeds max_file_size_bytes ({})",
-                      functions[i]->base(), code.size(), REXCVAR_GET(max_file_size_bytes));
+    std::vector<std::string> ordered(needed.begin(), needed.end());
+    std::sort(ordered.begin(), ordered.end());
+    println("#pragma once\n");
+    println("#include \"{}_pch.h\"\n", projectName);
+    for (const auto& name : ordered) {
+      println("DECLARE_REX_FUNC({});", name);
     }
+    SaveCurrentOutData(fmt::format("{}_funcs.{}.h", projectName, index));
 
-    out += code;
-    currentFileBytes += code.size();
+    println("#include \"{}_funcs.{}.h\"\n", projectName, index);
+    for (size_t entry : buckets[index]) {
+      out += bodies[entry];
+    }
+    SaveCurrentOutData(fmt::format("{}_recomp.{}.cpp", projectName, index));
   }
 
-  SaveCurrentOutData();
+  out = partition.Serialize();
+  SaveCurrentOutData(kPartitionFileName);
+
   REXCODEGEN_TRACE("Recompilation complete.");
 
   // Generate sources.cmake
@@ -257,7 +311,7 @@ bool CodegenWriter::write(bool force) {
   {
     auto& recompFiles = tmplData["recomp_files"];
     recompFiles = nlohmann::json::array();
-    for (size_t i = 0; i < cppFileIndex; ++i) {
+    for (size_t i = 0; i < buckets.size(); ++i) {
       recompFiles.push_back(fmt::format("{}_recomp.{}.cpp", projectName, i));
     }
     out = renderWithJson(registry, "codegen/sources_cmake", tmplData);
@@ -265,67 +319,66 @@ bool CodegenWriter::write(bool force) {
   }
 
   // Write all buffered files to disk
-  FlushPendingWrites();
-  return true;
+  return FlushPendingWrites();
 }
 
 void CodegenWriter::SaveCurrentOutData(const std::string_view name) {
   if (!out.empty()) {
-    std::string filename;
-
-    if (name.empty()) {
-      filename = fmt::format("{}_recomp.{}.cpp", config().projectName, cppFileIndex);
-      ++cppFileIndex;
-    } else {
-      filename = std::string(name);
-    }
-
-    pendingWrites.emplace_back(std::move(filename), std::move(out));
+    pendingWrites.emplace_back(std::string(name), std::move(out));
     out.clear();
   }
 }
 
-void CodegenWriter::FlushPendingWrites() {
+bool CodegenWriter::FlushPendingWrites() {
   std::filesystem::path outputPath = ctx_.configDir() / config().outDirectoryPath;
 
+  std::unordered_set<std::string> emitted;
+  emitted.reserve(pendingWrites.size());
+
+  // A swallowed failure would be stamped as success and skipped on the next run.
+  bool ok = true;
+
   for (const auto& [filename, content] : pendingWrites) {
-    std::string filePath = (outputPath / filename).string();
-    REXCODEGEN_TRACE("flush_pending_writes: filePath={}", filePath);
+    emitted.insert(filename);
+    auto filePath = outputPath / filename;
 
-    bool shouldWrite = true;
-
-    FILE* f = fopen(filePath.c_str(), "rb");
-    if (f) {
-      std::vector<uint8_t> temp;
-
-      fseek(f, 0, SEEK_END);
-      long fileSize = ftell(f);
-      if (fileSize == static_cast<long>(content.size())) {
-        fseek(f, 0, SEEK_SET);
-        temp.resize(fileSize);
-        fread(temp.data(), 1, fileSize, f);
-
-        shouldWrite = !XXH128_isEqual(XXH3_128bits(temp.data(), temp.size()),
-                                      XXH3_128bits(content.data(), content.size()));
-      }
-      fclose(f);
+    switch (WriteIfChanged(filePath, content)) {
+      case WriteOutcome::Failed:
+        REXCODEGEN_ERROR("Failed to write {}", filePath.string());
+        ok = false;
+        break;
+      case WriteOutcome::Unchanged:
+        REXCODEGEN_TRACE("Unchanged, skipping write: {}", filePath.string());
+        unchangedFiles_.push_back(filename);
+        break;
+      case WriteOutcome::Written:
+        REXCODEGEN_TRACE("Wrote {} bytes to {}", content.size(), filePath.string());
+        writtenFiles_.push_back(filename);
+        break;
     }
+  }
 
-    if (shouldWrite) {
-      f = fopen(filePath.c_str(), "wb");
-      if (!f) {
-        REXCODEGEN_ERROR("Failed to open file for writing: {}", filePath);
-        continue;
-      }
-      fwrite(content.data(), 1, content.size(), f);
-      fclose(f);
-      REXCODEGEN_TRACE("Wrote {} bytes to {}", content.size(), filePath);
+  for (const auto& entry : std::filesystem::directory_iterator(outputPath)) {
+    if (!entry.is_regular_file())
+      continue;
+    auto filename = entry.path().filename().string();
+    if (emitted.contains(filename))
+      continue;
+    if (!IsGeneratedOutputName(filename, config().projectName))
+      continue;
+
+    std::error_code ec;
+    std::filesystem::remove(entry.path(), ec);
+    if (ec) {
+      REXCODEGEN_ERROR("Failed to delete stale output {}: {}", entry.path().string(), ec.message());
+      continue;
     }
-
-    writtenFiles_.push_back(filename);
+    REXCODEGEN_TRACE("Deleted stale output: {}", entry.path().string());
+    deletedFiles_.push_back(filename);
   }
 
   pendingWrites.clear();
+  return ok;
 }
 
 }  // namespace rex::codegen

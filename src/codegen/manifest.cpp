@@ -81,6 +81,7 @@ std::optional<ManifestConfig> ManifestConfig::Load(const std::filesystem::path& 
 
   ManifestConfig manifest;
   manifest.manifestDir = path.parent_path();
+  manifest.manifestPath = path;
 
   auto* project = tbl["project"].as_table();
   if (!project) {

@@ -12,7 +12,6 @@
 #include "ui.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cstdio>
 #include <iostream>
 #include <ostream>
@@ -22,21 +21,8 @@
 #include <fmt/format.h>
 #include <spdlog/details/log_msg.h>
 
-#ifdef _WIN32
-#include <io.h>
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#define rexglue_isatty(fd) _isatty(fd)
-#define rexglue_fileno(stream) _fileno(stream)
-#else
-#include <unistd.h>
-#define rexglue_isatty(fd) isatty(fd)
-#define rexglue_fileno(stream) fileno(stream)
-#endif
-
 #include <rex/logging.h>
+#include <rex/platform/console.h>
 
 namespace rexglue::ui {
 
@@ -49,10 +35,6 @@ void RequireGlobalSink() {
   if (!g_sink) {
     throw std::logic_error("rexglue::ui not initialised; call ui::Init first");
   }
-}
-
-bool StdinIsTty() {
-  return rexglue_isatty(rexglue_fileno(stdin)) != 0;
 }
 
 std::string_view LevelLetter(spdlog::level::level_enum lvl) {
@@ -90,20 +72,6 @@ std::string_view LevelColor(spdlog::level::level_enum lvl) {
     default:
       return {};
   }
-}
-
-bool ReadYesAnswer(std::istream& in) {
-  std::string line;
-  if (!std::getline(in, line))
-    return false;
-  std::transform(line.begin(), line.end(), line.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
-  auto first = line.find_first_not_of(" \t\r\n");
-  if (first == std::string::npos)
-    return false;
-  auto last = line.find_last_not_of(" \t\r\n");
-  std::string trimmed = line.substr(first, last - first + 1);
-  return trimmed == "y" || trimmed == "yes";
 }
 
 }  // namespace
@@ -196,20 +164,6 @@ void SetSinkActiveProgress(bool active) {
   g_sink->setActiveProgress(active);
 }
 
-bool ConfirmWithStream(std::string_view question, std::istream& in, bool stdin_is_tty) {
-  {
-    GlobalSinkAccessor acc;
-    acc.writeColored(color::kBold, question);
-    acc.writeRaw(" ");
-    acc.writeColored(color::kDim, "[y/N]:");
-    acc.writeRaw(" ");
-    acc.flush();
-  }
-  if (!stdin_is_tty)
-    return false;
-  return ReadYesAnswer(in);
-}
-
 }  // namespace detail
 
 void Init(const InitOptions& opts) {
@@ -219,18 +173,12 @@ void Init(const InitOptions& opts) {
   g_sink = g_sink_ptr.get();
   rex::ReplaceConsoleSink(g_sink_ptr);
 
-#ifdef _WIN32
   if (opts.tty) {
-    SetConsoleOutputCP(CP_UTF8);
+    rex::platform::console::set_utf8_output_codepage();
     if (opts.color) {
-      HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
-      DWORD mode = 0;
-      if (h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode)) {
-        SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-      }
+      rex::platform::console::enable_ansi_escapes(stderr);
     }
   }
-#endif
 }
 
 void Shutdown() {
@@ -270,42 +218,6 @@ void KeyValueBlock(std::string_view header, std::span<const KeyValueRow> rows) {
   acc.writeRaw("\n");
 }
 
-void PlanTable(std::string_view header, std::span<const PlanRow> rows) {
-  detail::GlobalSinkAccessor acc;
-  if (!header.empty()) {
-    acc.writeColored(color::kBold, header);
-    acc.writeRaw("\n");
-  }
-  std::size_t path_width = 0;
-  for (const auto& r : rows)
-    path_width = std::max(path_width, r.path.size());
-  for (const auto& r : rows) {
-    acc.writeRaw("  [");
-    auto trimmed_action = r.action_label;
-    while (!trimmed_action.empty() && trimmed_action.back() == ' ')
-      trimmed_action.remove_suffix(1);
-    if (trimmed_action == "write") {
-      acc.writeColored(color::kGreen, r.action_label);
-    } else if (trimmed_action == "delete") {
-      acc.writeColored(color::kRed, r.action_label);
-    } else {
-      acc.writeRaw(r.action_label);
-    }
-    acc.writeRaw("] ");
-    acc.writeRaw(r.path);
-    if (!r.reason.empty()) {
-      if (path_width > r.path.size()) {
-        acc.writeRaw(std::string(path_width - r.path.size() + 2, ' '));
-      } else {
-        acc.writeRaw("  ");
-      }
-      acc.writeColored(color::kDim, r.reason);
-    }
-    acc.writeRaw("\n");
-  }
-  acc.writeRaw("\n");
-}
-
 void ManualReviewList(std::string_view header, std::span<const ManualReviewRow> rows) {
   detail::GlobalSinkAccessor acc;
   if (!header.empty()) {
@@ -324,10 +236,6 @@ void ManualReviewList(std::string_view header, std::span<const ManualReviewRow> 
     }
   }
   acc.writeRaw("\n");
-}
-
-bool Confirm(std::string_view question) {
-  return detail::ConfirmWithStream(question, std::cin, StdinIsTty());
 }
 
 void DoneSummary(std::chrono::milliseconds elapsed) {

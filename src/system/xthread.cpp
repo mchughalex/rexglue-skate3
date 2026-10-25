@@ -35,6 +35,7 @@
 #include <rex/system/xmutant.h>
 #include <rex/system/xthread.h>
 #include <rex/thread.h>
+#include <rex/vec128.h>
 
 REXCVAR_DEFINE_BOOL(ignore_thread_priorities, true, "Kernel",
                     "Ignores game-specified thread priorities");
@@ -132,6 +133,15 @@ XThread* XThread::GetCurrentThread() {
     assert_always("Attempting to use kernel stuff from a non-kernel thread");
   }
   return thread;
+}
+
+void XThread::CheckTitleTermination() {
+  XThread* self = GetBoundCurrentXThread();
+  if (self && self->is_guest_thread() && self->is_running() &&
+      self->kernel_state()->is_terminating_title()) {
+    // Unwind cleanly at this safe point. Does not return.
+    self->Exit(0);
+  }
 }
 
 uint32_t XThread::GetCurrentThreadHandle() {
@@ -513,6 +523,12 @@ X_STATUS XThread::Exit(int exit_code) {
 
   // TODO(tomc): do we need thread notifications (related to processor thread management)?
 
+  // The guest stack belongs to the thread's execution lifetime, not the handle
+  // lifetime. Games can keep thread handles after exit; holding the stack until
+  // object destruction leaks the reserved stack range and eventually makes
+  // ExCreateThread fail even though the old threads are no longer running.
+  FreeStack();
+
   // NOTE: unless PlatformExit fails, expect it to never return!
   current_xthread_tls_ = nullptr;
   PROFILE_THREAD_EXIT();
@@ -540,10 +556,12 @@ X_STATUS XThread::Terminate(int exit_code) {
     // Same lifetime rule as Exit(): don't allow ReleaseHandle() to destroy
     // the thread object before Thread::Exit() reaches pthread_exit().
     auto self = retain_object(this);
+    FreeStack();
     ReleaseHandle();
     rex::thread::Thread::Exit(exit_code);
   } else {
     thread_->Terminate(exit_code);
+    FreeStack();
     ReleaseHandle();
   }
 
@@ -729,8 +747,8 @@ void XThread::DeliverAPCs() {
       if (dispatcher->GetFunction(apc->kernel_routine)) {
         uint64_t kernel_args[] = {apc_ptr, scratch_address_ + 0, scratch_address_ + 4,
                                   scratch_address_ + 8, scratch_address_ + 12};
-        dispatcher->Execute(thread_state_.get(), apc->kernel_routine, kernel_args,
-                            rex::countof(kernel_args));
+        dispatcher->ExecuteTrap(thread_state_.get(), apc->kernel_routine, kernel_args,
+                                rex::countof(kernel_args));
       } else {
         REXSYS_ERROR("DeliverAPCs: kernel_routine {:08X} not found", uint32_t(apc->kernel_routine));
       }
@@ -747,8 +765,8 @@ void XThread::DeliverAPCs() {
     if (normal_routine) {
       if (dispatcher->GetFunction(normal_routine)) {
         uint64_t normal_args[] = {normal_context, arg1, arg2};
-        dispatcher->Execute(thread_state_.get(), normal_routine, normal_args,
-                            rex::countof(normal_args));
+        dispatcher->ExecuteTrap(thread_state_.get(), normal_routine, normal_args,
+                                rex::countof(normal_args));
       } else {
         REXSYS_ERROR("DeliverAPCs: normal_routine {:08X} not found", normal_routine);
       }
@@ -791,11 +809,11 @@ void XThread::RundownAPCs() {
       if (apc->rundown_routine == XAPC::kDummyRundownRoutine) {
         // No-op.
       } else if (apc->rundown_routine) {
-        auto fn = kernel_state_->function_dispatcher()->GetFunction(apc->rundown_routine);
-        if (fn) {
-          auto* ctx = thread_state_->context();
-          ctx->r3.u64 = apc_ptr;
-          fn(*ctx, mem->virtual_membase());
+        auto* dispatcher = kernel_state_->function_dispatcher();
+        if (dispatcher->GetFunction(apc->rundown_routine)) {
+          uint64_t rundown_args[] = {apc_ptr};
+          dispatcher->Execute(thread_state_.get(), apc->rundown_routine, rundown_args,
+                              rex::countof(rundown_args));
         } else {
           REXSYS_WARN("RundownAPCs: rundown_routine {:08X} not found",
                       uint32_t(apc->rundown_routine));
@@ -925,7 +943,7 @@ X_STATUS XThread::Resume(uint32_t* out_suspend_count) {
     *out_suspend_count = previous_suspend_count;
   }
   return thread_->Resume(&unused_host_suspend_count) ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
-#elif REX_PLATFORM_LINUX
+#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC
   bool should_resume_host = false;
   {
     std::lock_guard<std::mutex> lock(suspend_mutex_);
@@ -973,7 +991,7 @@ X_STATUS XThread::Suspend(uint32_t* out_suspend_count) {
   return thread_->Suspend(&unused_host_suspend_count) ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
 }
 
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
 uint32_t XThread::SelfSuspend() {
   auto guest_thread = guest_object<X_KTHREAD>();
   std::unique_lock<std::mutex> lock(suspend_mutex_);
@@ -999,8 +1017,10 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
     timeout_ms = 0;
   }
   timeout_ms = chrono::Clock::ScaleGuestDurationMillis(timeout_ms);
+  CheckTitleTermination();
   if (alertable) {
     auto result = rex::thread::AlertableSleep(std::chrono::milliseconds(timeout_ms));
+    CheckTitleTermination();
     switch (result) {
       default:
       case rex::thread::SleepResult::kSuccess:
@@ -1018,6 +1038,7 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
     } else {
       rex::thread::Sleep(std::chrono::milliseconds(timeout_ms));
     }
+    CheckTitleTermination();
   }
 
   return X_STATUS_SUCCESS;
@@ -1427,8 +1448,8 @@ XHostThread::XHostThread(KernelState* kernel_state, uint32_t stack_size, uint32_
 }
 
 void XHostThread::Execute() {
-  REXSYS_INFO("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X}, <host>)", thread_id_,
-              handle(), thread_name_, thread_->system_id());
+  REXSYS_DEBUG("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X}, <host>)", thread_id_,
+               handle(), thread_name_, thread_->system_id());
 
   // Let the kernel know we are starting.
   kernel_state_->OnThreadExecute(this);

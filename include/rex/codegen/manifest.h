@@ -43,6 +43,7 @@ std::string CanonicalizeModuleGuestPath(std::string_view path, std::string_view 
 struct ManifestConfig {
   std::string projectName;
   std::optional<std::string> sdkVersion;  ///< Last SDK that ran codegen on this project
+  std::filesystem::path manifestPath;     ///< File this manifest was loaded from
   std::optional<std::string> gameRoot;    ///< Game asset root, relative to manifestDir.
                                           ///< Set by `rexglue init` to anchor DLL guest paths.
   std::filesystem::path manifestDir;      ///< Directory containing the manifest

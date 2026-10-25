@@ -3,10 +3,27 @@
 
 add_library(rexinput OBJECT
     input_system.cpp
+    device_assignment.cpp
+    state_merge.cpp
     mnk/mnk_input_driver.cpp
     nop/nop_input_driver.cpp
 )
 add_library(rex::input ALIAS rexinput)
+
+rex_target_pch(rexinput
+    <mutex>
+    <rex/math.h>
+    <rex/string.h>
+    <rex/memory.h>
+    <rex/filesystem.h>
+    <rex/thread.h>
+    <rex/thread/mutex.h>
+    <rex/ppc/context.h>
+    <rex/system/kernel_state.h>
+    <rex/system/xthread.h>
+    <rex/ui/window.h>
+    <rex/ui/presenter.h>
+)
 
 target_include_directories(rexinput PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>

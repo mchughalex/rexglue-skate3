@@ -30,7 +30,6 @@
 #include <rex/graphics/flags.h>
 #include <rex/graphics/format/dxbc.h>
 #include <rex/graphics/pipeline/shader/dxbc_translator.h>
-#include <rex/graphics/trace_writer.h>
 #include <rex/graphics/util/draw.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
@@ -215,7 +214,7 @@ bool D3D12RenderTargetCache::Initialize() {
   edram_buffer_state_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
   // Creating zeroed for stable initial value with ROV (though on a real
   // console it has to be cleared anyway probably) and not to leak irrelevant
-  // data to trace dumps when not covered by host render targets entirely.
+  // data when not covered by host render targets entirely.
   if (FAILED(device->CreateCommittedResource(
           &ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE, &edram_buffer_desc,
           edram_buffer_state_, nullptr, IID_PPV_ARGS(&edram_buffer_)))) {
@@ -1033,9 +1032,6 @@ void D3D12RenderTargetCache::Shutdown(bool from_destructor) {
   }
   ui::d3d12::util::ReleaseAndNull(resolve_copy_root_signature_);
 
-  edram_snapshot_restore_pool_.reset();
-  ui::d3d12::util::ReleaseAndNull(edram_snapshot_download_buffer_);
-
   ui::d3d12::util::ReleaseAndNull(edram_buffer_descriptor_heap_);
   ui::d3d12::util::ReleaseAndNull(edram_buffer_);
 
@@ -1045,9 +1041,6 @@ void D3D12RenderTargetCache::Shutdown(bool from_destructor) {
 }
 
 void D3D12RenderTargetCache::CompletedSubmissionUpdated() {
-  if (edram_snapshot_restore_pool_) {
-    edram_snapshot_restore_pool_->Reclaim(command_processor_.GetCompletedSubmission());
-  }
   if (transfer_vertex_buffer_pool_) {
     transfer_vertex_buffer_pool_->Reclaim(command_processor_.GetCompletedSubmission());
   }
@@ -1179,7 +1172,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
 
   draw_util::ResolveInfo resolve_info;
   bool fixed_16_truncated_to_minus_1_to_1 = IsFixed16TruncatedToMinus1To1();
-  if (!draw_util::GetResolveInfo(register_file(), memory, trace_writer_, draw_resolution_scale_x(),
+  if (!draw_util::GetResolveInfo(register_file(), memory, draw_resolution_scale_x(),
                                  draw_resolution_scale_y(), fixed_16_truncated_to_minus_1_to_1,
                                  fixed_16_truncated_to_minus_1_to_1, resolve_info)) {
     return false;
@@ -1425,157 +1418,6 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
   }
 
   return copied && cleared;
-}
-
-bool D3D12RenderTargetCache::InitializeTraceSubmitDownloads() {
-  if (IsDrawResolutionScaled()) {
-    // No 1:1 mapping.
-    return false;
-  }
-  if (!edram_snapshot_download_buffer_) {
-    D3D12_RESOURCE_DESC edram_snapshot_download_buffer_desc;
-    ui::d3d12::util::FillBufferResourceDesc(edram_snapshot_download_buffer_desc,
-                                            xenos::kEdramSizeBytes, D3D12_RESOURCE_FLAG_NONE);
-    const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
-    ID3D12Device* device = provider.GetDevice();
-    if (FAILED(device->CreateCommittedResource(
-            &ui::d3d12::util::kHeapPropertiesReadback, provider.GetHeapFlagCreateNotZeroed(),
-            &edram_snapshot_download_buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-            IID_PPV_ARGS(&edram_snapshot_download_buffer_)))) {
-      REXGPU_ERROR(
-          "D3D12RenderTargetCache: Failed to create a EDRAM snapshot download "
-          "buffer");
-      return false;
-    }
-  }
-  if (GetPath() == Path::kHostRenderTargets) {
-    // Dump all host render targets to edram_buffer_.
-    if (!DumpRenderTargets(0, xenos::kEdramTileCount, 1, xenos::kEdramTileCount)) {
-      REXGPU_ERROR("D3D12RenderTargetCache: Failed to dump host render targets for trace");
-      return false;
-    }
-  }
-  TransitionEdramBuffer(D3D12_RESOURCE_STATE_COPY_SOURCE);
-  command_processor_.SubmitBarriers();
-  command_processor_.GetDeferredCommandList().D3DCopyBufferRegion(
-      edram_snapshot_download_buffer_, 0, edram_buffer_, 0, xenos::kEdramSizeBytes);
-  return true;
-}
-
-void D3D12RenderTargetCache::InitializeTraceCompleteDownloads() {
-  if (!edram_snapshot_download_buffer_) {
-    return;
-  }
-  void* download_mapping;
-  if (SUCCEEDED(edram_snapshot_download_buffer_->Map(0, nullptr, &download_mapping))) {
-    trace_writer_.WriteEdramSnapshot(download_mapping);
-    D3D12_RANGE download_write_range = {};
-    edram_snapshot_download_buffer_->Unmap(0, &download_write_range);
-  } else {
-    REXGPU_ERROR(
-        "D3D12RenderTargetCache: Failed to map the EDRAM snapshot download "
-        "buffer");
-  }
-  edram_snapshot_download_buffer_->Release();
-  edram_snapshot_download_buffer_ = nullptr;
-}
-
-void D3D12RenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
-  if (IsDrawResolutionScaled()) {
-    // No 1:1 mapping.
-    return;
-  }
-
-  // Create the buffer - will be used for copying to either a 32-bit 1280x2048
-  // render target or the EDRAM buffer.
-  const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
-  if (!edram_snapshot_restore_pool_) {
-    edram_snapshot_restore_pool_ =
-        std::make_unique<ui::d3d12::D3D12UploadBufferPool>(provider, xenos::kEdramSizeBytes);
-  }
-  ID3D12Resource* upload_buffer;
-  size_t upload_buffer_offset;
-  void* upload_buffer_mapping = edram_snapshot_restore_pool_->Request(
-      command_processor_.GetCurrentSubmission(), xenos::kEdramSizeBytes, 1, &upload_buffer,
-      &upload_buffer_offset, nullptr);
-  if (!upload_buffer_mapping) {
-    REXGPU_ERROR(
-        "D3D12RenderTargetCache: Failed to get a buffer for restoring a EDRAM "
-        "snapshot");
-    return;
-  }
-
-  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
-
-  switch (GetPath()) {
-    case Path::kHostRenderTargets: {
-      // k_32_FLOAT because it's unambiguous (not effected by something like
-      // DXGI_FORMAT_R8G8B8A8 vs. DXGI_FORMAT_B8G8R8A8).
-      D3D12RenderTarget* full_edram_render_target =
-          static_cast<D3D12RenderTarget*>(PrepareFullEdram1280xRenderTargetForSnapshotRestoration(
-              xenos::ColorRenderTargetFormat::k_32_FLOAT));
-      if (!full_edram_render_target) {
-        return;
-      }
-      D3D12_TEXTURE_COPY_LOCATION copy_source_location;
-      copy_source_location.pResource = upload_buffer;
-      copy_source_location.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-      UINT64 copy_total_bytes;
-      D3D12_RESOURCE_DESC full_edram_render_target_desc =
-          full_edram_render_target->resource()->GetDesc();
-      provider.GetDevice()->GetCopyableFootprints(&full_edram_render_target_desc, 0, 1, 0,
-                                                  &copy_source_location.PlacedFootprint, nullptr,
-                                                  nullptr, &copy_total_bytes);
-      // 1280 width * sizeof(uint32_t) is aligned to
-      // D3D12_TEXTURE_DATA_PITCH_ALIGNMENT (256).
-      assert_true(copy_total_bytes <= xenos::kEdramSizeBytes);
-      assert_false(full_edram_render_target->key().Is64bpp());
-      uint32_t pitch_tiles = full_edram_render_target->key().pitch_tiles_at_32bpp;
-      uint32_t tile_rows = xenos::kEdramTileCount / pitch_tiles;
-      assert_true(pitch_tiles * tile_rows == xenos::kEdramTileCount);
-      const uint8_t* snapshot_sample_row = reinterpret_cast<const uint8_t*>(snapshot);
-      for (uint32_t y_tile = 0; y_tile < tile_rows; ++y_tile) {
-        uint8_t* upload_buffer_tile_row_origin =
-            reinterpret_cast<uint8_t*>(upload_buffer_mapping) +
-            copy_source_location.PlacedFootprint.Offset +
-            xenos::kEdramTileHeightSamples * y_tile *
-                copy_source_location.PlacedFootprint.Footprint.RowPitch;
-        for (uint32_t x_tile = 0; x_tile < pitch_tiles; ++x_tile) {
-          uint8_t* upload_buffer_sample_row =
-              upload_buffer_tile_row_origin +
-              sizeof(uint32_t) * xenos::kEdramTileWidthSamples * x_tile;
-          for (uint32_t sample_row = 0; sample_row < xenos::kEdramTileHeightSamples; ++sample_row) {
-            std::memcpy(upload_buffer_sample_row, snapshot_sample_row,
-                        sizeof(uint32_t) * xenos::kEdramTileWidthSamples);
-            snapshot_sample_row += sizeof(uint32_t) * xenos::kEdramTileWidthSamples;
-            upload_buffer_sample_row += copy_source_location.PlacedFootprint.Footprint.RowPitch;
-          }
-        }
-      }
-      command_processor_.PushTransitionBarrier(
-          full_edram_render_target->resource(),
-          full_edram_render_target->SetResourceState(D3D12_RESOURCE_STATE_COPY_DEST),
-          D3D12_RESOURCE_STATE_COPY_DEST);
-      command_processor_.SubmitBarriers();
-      D3D12_TEXTURE_COPY_LOCATION copy_dest_location;
-      copy_dest_location.pResource = full_edram_render_target->resource();
-      copy_dest_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-      copy_dest_location.SubresourceIndex = 0;
-      command_list.D3DCopyTextureRegion(&copy_dest_location, 0, 0, 0, &copy_source_location,
-                                        nullptr);
-    } break;
-
-    case Path::kPixelShaderInterlock: {
-      std::memcpy(upload_buffer_mapping, snapshot, xenos::kEdramSizeBytes);
-      TransitionEdramBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
-      command_processor_.SubmitBarriers();
-      command_list.D3DCopyBufferRegion(edram_buffer_, 0, upload_buffer,
-                                       UINT64(upload_buffer_offset), xenos::kEdramSizeBytes);
-    } break;
-
-    default:
-      assert_unhandled_case(GetPath());
-  }
 }
 
 DXGI_FORMAT D3D12RenderTargetCache::GetColorResourceDXGIFormat(

@@ -17,8 +17,9 @@
 // Codegen/Output
 //=============================================================================
 
-REXCVAR_DEFINE_UINT32(max_file_size_bytes, 2097152, "Codegen",
-                      "Target maximum source file size in bytes")
+REXCVAR_DEFINE_UINT32(max_file_size_bytes, 1048576, "Codegen",
+                      "Target source file size in bytes; sets how many recomp files a project "
+                      "is split into, chosen once and then persisted")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly)
     .range(65536, 67108864);
 

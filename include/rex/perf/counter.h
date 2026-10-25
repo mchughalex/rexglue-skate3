@@ -618,16 +618,15 @@ inline void FlushCsv() {}
 // Moved here from rex::debug to consolidate all perf code under rex::perf.
 class Profiler {
  public:
-  // Call once at runtime startup to enable Tracy's network threads.
-  // CLI tools should skip this to avoid socket listeners entirely.
   static void Startup() {
 #ifdef REXGLUE_ENABLE_PROFILING
-    tracy::StartupProfiler();
+    if (!tracy::IsProfilerStarted())
+      tracy::StartupProfiler();
 #endif
   }
   static void OnThreadEnter(const char* name = nullptr) {
 #ifdef REXGLUE_ENABLE_PROFILING
-    if (name)
+    if (name && tracy::IsProfilerStarted())
       tracy::SetThreadName(name);
 #else
     (void)name;
@@ -638,7 +637,9 @@ class Profiler {
   static void ThreadExit() {}
   static void Flip() {
 #ifdef REXGLUE_ENABLE_PROFILING
-    FrameMark;
+    if (tracy::IsProfilerStarted()) {
+      FrameMark;
+    }
 #endif
 #ifdef REXGLUE_ENABLE_PERF_COUNTERS
     ResetFrameCounters();
@@ -648,7 +649,8 @@ class Profiler {
   static void Flush() {}
   static void Shutdown() {
 #ifdef REXGLUE_ENABLE_PROFILING
-    tracy::ShutdownProfiler();
+    if (tracy::IsProfilerStarted())
+      tracy::ShutdownProfiler();
 #endif
 #ifdef REXGLUE_ENABLE_PERF_COUNTERS
     FlushCsv();

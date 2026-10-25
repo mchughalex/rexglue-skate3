@@ -8,6 +8,8 @@ set(CODEGEN_CORE_SOURCES
     code_emitter.cpp
     decoded_binary.cpp
     codegen_writer.cpp
+    output_partition.cpp
+    output_stamp.cpp
     config.cpp
     function_graph.cpp
     function_scanner.cpp
@@ -52,22 +54,7 @@ set(CODEGEN_BUILDER_SOURCES
 set(TEMPLATE_SOURCE_DIR "${REXGLUE_ROOT}/resources/templates")
 set(TEMPLATE_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/templates")
 
-set(INJA_TEMPLATE_FILES
-    ${TEMPLATE_SOURCE_DIR}/init/app_header.inja
-    ${TEMPLATE_SOURCE_DIR}/init/main_cpp.inja
-    ${TEMPLATE_SOURCE_DIR}/init/cmakelists.inja
-    ${TEMPLATE_SOURCE_DIR}/init/cmake_presets.inja
-    ${TEMPLATE_SOURCE_DIR}/init/rexglue_cmake.inja
-    ${TEMPLATE_SOURCE_DIR}/init/manifest_toml.inja
-    ${TEMPLATE_SOURCE_DIR}/codegen/_indirect_call.inja
-    ${TEMPLATE_SOURCE_DIR}/codegen/init_cpp.inja
-    ${TEMPLATE_SOURCE_DIR}/codegen/init_h.inja
-    ${TEMPLATE_SOURCE_DIR}/codegen/sources_cmake.inja
-    ${TEMPLATE_SOURCE_DIR}/test/ppc_test_cases_cpp.inja
-    ${TEMPLATE_SOURCE_DIR}/test/ppc_test_decls_h.inja
-    ${TEMPLATE_SOURCE_DIR}/test/ppc_test_functions_cpp.inja
-    ${TEMPLATE_SOURCE_DIR}/test/ppc_config_h.inja
-)
+file(GLOB_RECURSE INJA_TEMPLATE_FILES CONFIGURE_DEPENDS "${TEMPLATE_SOURCE_DIR}/*.inja")
 
 # Build output header paths
 set(EMBEDDED_HEADERS "")
@@ -101,6 +88,7 @@ add_library(rexcodegen STATIC
 add_library(rex::codegen ALIAS rexcodegen)
 add_dependencies(rexcodegen embed_templates)
 
+rex_target_pch(rexcodegen <rex/codegen/function_types.h>)
 
 target_include_directories(rexcodegen
     PUBLIC
@@ -117,7 +105,6 @@ target_include_directories(rexcodegen
 
 target_link_libraries(rexcodegen
     PUBLIC
-        rexcore
         rexruntime
         fmt::fmt
         spdlog::spdlog

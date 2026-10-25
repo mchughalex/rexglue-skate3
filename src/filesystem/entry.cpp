@@ -52,8 +52,11 @@ bool Entry::is_read_only() const {
 
 Entry* Entry::GetChild(const std::string_view name) {
   auto global_lock = global_critical_region_.Acquire();
+  // The size test is exact, not just a hint: the fold is ASCII-only, so any two
+  // names it calls equal hold the same bytes per codepoint. It skips the UTF-8
+  // decode for nearly every child, and a game directory can hold thousands.
   auto it = std::find_if(children_.cbegin(), children_.cend(), [&](const auto& child) {
-    return rex::string::utf8_equal_case(child->name(), name);
+    return child->name().size() == name.size() && rex::string::utf8_equal_case(child->name(), name);
   });
   if (it == children_.cend()) {
     return nullptr;
@@ -132,7 +135,7 @@ bool Entry::Delete() {
   return parent_->Delete(this);
 }
 
-void Entry::Rename(const std::filesystem::path& file_path) {
+X_STATUS Entry::Rename(const std::filesystem::path& file_path) {
   // Store the string so split path string_views remain valid.
   const std::string path_str = rex::path_to_utf8(file_path);
   std::vector<std::string_view> path_parts = rex::string::utf8_split_path(path_str);
@@ -141,12 +144,16 @@ void Entry::Rename(const std::filesystem::path& file_path) {
     path_parts.erase(path_parts.begin());
   }
 
-  RenameEntryInternal(path_parts);
+  X_STATUS status = RenameEntryInternal(path_parts);
+  if (status != X_STATUS_SUCCESS) {
+    return status;
+  }
 
   const std::string guest_path = rex::string::utf8_join_guest_paths(path_parts);
   absolute_path_ = rex::string::utf8_join_guest_paths(device_->mount_path(), guest_path);
   path_ = guest_path;
   name_ = rex::path_to_utf8(file_path.filename());
+  return X_STATUS_SUCCESS;
 }
 
 void Entry::Touch() {

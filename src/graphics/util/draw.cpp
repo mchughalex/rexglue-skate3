@@ -785,8 +785,8 @@ const ResolveCopyShaderInfo resolve_copy_shader_info[size_t(ResolveCopyShaderInd
 };
 
 bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
-                    TraceWriter& trace_writer, uint32_t draw_resolution_scale_x,
-                    uint32_t draw_resolution_scale_y, bool fixed_rg16_truncated_to_minus_1_to_1,
+                    uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
+                    bool fixed_rg16_truncated_to_minus_1_to_1,
                     bool fixed_rgba16_truncated_to_minus_1_to_1, ResolveInfo& info_out) {
   // Don't pass uninitialized values to shaders, not to leak data to frame
   // captures. Also initialize an invalid resolve to empty.
@@ -815,7 +815,6 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
     assert_always();
     return false;
   }
-  trace_writer.WriteMemoryRead(fetch.address * sizeof(uint32_t), fetch.size * sizeof(uint32_t));
   const float* vertices_guest =
       reinterpret_cast<const float*>(memory.TranslatePhysical(fetch.address * sizeof(uint32_t)));
   // Most vertices have a negative half-pixel offset applied, which we reverse.

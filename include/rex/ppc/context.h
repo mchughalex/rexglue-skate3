@@ -19,49 +19,12 @@
 #include <cstring>
 
 #include <rex/platform/fpscr.h>
+#include <rex/ppc/func.h>
 #include <rex/types.h>
 
 #include <simde/x86/avx.h>
 #include <simde/x86/sse.h>
 #include <simde/x86/sse4.1.h>
-
-//=============================================================================
-// PPCFunc Type Definition
-//=============================================================================
-// Function signature for recompiled PPC functions.
-// All recompiled functions take a context reference and memory base pointer.
-
-// Forward declaration of the PPC execution context
-struct PPCContext;
-
-// Function signature for recompiled PPC functions
-using PPCFunc = void(PPCContext& ctx, uint8_t* base);
-
-namespace rex::runtime {
-PPCFunc* ResolveIndirectFunction(uint32_t guest_address);
-}  // namespace rex::runtime
-
-//=============================================================================
-// PPC Function Macros
-//=============================================================================
-
-#define REX_JOIN(x, y) x##y
-#define REX_XSTRINGIFY(x) #x
-#define REX_STRINGIFY(x) REX_XSTRINGIFY(x)
-#define REX_FUNC(x) void x([[maybe_unused]] PPCContext& __restrict ctx, uint8_t* base)
-#define REX_EXTERN(x) extern "C" REX_FUNC(x)
-#define REX_WEAK_FUNC(x) __attribute__((weak, noinline)) REX_FUNC(x)
-
-//=============================================================================
-// Function Mapping
-//=============================================================================
-
-struct PPCFuncMapping {
-  size_t guest;
-  PPCFunc* host;
-};
-
-extern PPCFuncMapping PPCFuncMappings[];
 
 //=============================================================================
 // Pack/Unpack Constants (NORMPACKED32 - 2:10:10:10 format)
@@ -196,8 +159,17 @@ struct FPSCRRegister {
   static constexpr size_t FlushMask = Platform::FlushMask;
   static constexpr size_t ExceptionMask = Platform::ExceptionMask;
 
+  // Bits the guest owns; the rest is host policy seeded by InitHost.
+  static constexpr uint32_t GuestMask = uint32_t(RoundMaskVal) | uint32_t(FlushMask);
+
   inline uint32_t getcsr() noexcept { return Platform::getcsr(); }
   inline void setcsr(uint32_t csr) noexcept { Platform::setcsr(csr); }
+
+  // Restoring the whole word would unmask every FP exception when csr is 0.
+  inline void restoreGuestBits(uint32_t saved) noexcept {
+    csr = (getcsr() & ~GuestMask) | (saved & GuestMask);
+    setcsr(csr);
+  }
 
   // Scalar (FPU) mode also runs with flush-to-zero/denormals-are-zero. PPC
   // hardware processes denormals at full speed, but every denormal operand
@@ -285,13 +257,9 @@ using PPCFPSCRRegister = rex::ppc::FPSCRRegister;
 
 struct alignas(0x40) PPCContext {
   PPCRegister r3;
-#if !defined(REX_CONFIG_NON_ARGUMENT_AS_LOCAL)
   PPCRegister r0;
-#endif
   PPCRegister r1;
-#if !defined(REX_CONFIG_NON_ARGUMENT_AS_LOCAL)
   PPCRegister r2;
-#endif
   PPCRegister r4;
   PPCRegister r5;
   PPCRegister r6;
@@ -299,12 +267,9 @@ struct alignas(0x40) PPCContext {
   PPCRegister r8;
   PPCRegister r9;
   PPCRegister r10;
-#if !defined(REX_CONFIG_NON_ARGUMENT_AS_LOCAL)
   PPCRegister r11;
   PPCRegister r12;
-#endif
   PPCRegister r13;
-#if !defined(REX_CONFIG_NON_VOLATILE_AS_LOCAL)
   PPCRegister r14;
   PPCRegister r15;
   PPCRegister r16;
@@ -323,18 +288,10 @@ struct alignas(0x40) PPCContext {
   PPCRegister r29;
   PPCRegister r30;
   PPCRegister r31;
-#endif
 
-#if !defined(REX_CONFIG_SKIP_LR)
   uint64_t lr;
-#endif
-#if !defined(REX_CONFIG_CTR_AS_LOCAL)
   PPCRegister ctr;
-#endif
-#if !defined(REX_CONFIG_XER_AS_LOCAL)
   PPCXERRegister xer;
-#endif
-#if !defined(REX_CONFIG_RESERVED_AS_LOCAL)
   PPCRegister reserved;
   uint32_t reserved_address;
   uint32_t reserved_size;
@@ -342,11 +299,7 @@ struct alignas(0x40) PPCContext {
   uint64_t reserved_bitmap_mask;
   bool reserved_global_acquired;
   bool reserved_valid;
-#endif
-#if !defined(REX_CONFIG_SKIP_MSR)
   uint32_t msr = 0x200A000;
-#endif
-#if !defined(REX_CONFIG_CR_AS_LOCAL)
   PPCCRRegister cr0;
   PPCCRRegister cr1;
   PPCCRRegister cr2;
@@ -355,7 +308,6 @@ struct alignas(0x40) PPCContext {
   PPCCRRegister cr5;
   PPCCRRegister cr6;
   PPCCRRegister cr7;
-#endif
   PPCFPSCRRegister fpscr;
   uint8_t vscr_sat = 0;  // VSCR saturation flag (for vector ops)
 
@@ -367,9 +319,7 @@ struct alignas(0x40) PPCContext {
    */
   uint32_t last_indirect_target = 0;
 
-#if !defined(REX_CONFIG_NON_ARGUMENT_AS_LOCAL)
   PPCRegister f0;
-#endif
   PPCRegister f1;
   PPCRegister f2;
   PPCRegister f3;
@@ -383,7 +333,6 @@ struct alignas(0x40) PPCContext {
   PPCRegister f11;
   PPCRegister f12;
   PPCRegister f13;
-#if !defined(REX_CONFIG_NON_VOLATILE_AS_LOCAL)
   PPCRegister f14;
   PPCRegister f15;
   PPCRegister f16;
@@ -402,7 +351,6 @@ struct alignas(0x40) PPCContext {
   PPCRegister f29;
   PPCRegister f30;
   PPCRegister f31;
-#endif
 
   PPCVRegister v0;
   PPCVRegister v1;
@@ -418,7 +366,6 @@ struct alignas(0x40) PPCContext {
   PPCVRegister v11;
   PPCVRegister v12;
   PPCVRegister v13;
-#if !defined(REX_CONFIG_NON_VOLATILE_AS_LOCAL)
   PPCVRegister v14;
   PPCVRegister v15;
   PPCVRegister v16;
@@ -437,8 +384,6 @@ struct alignas(0x40) PPCContext {
   PPCVRegister v29;
   PPCVRegister v30;
   PPCVRegister v31;
-#endif
-#if !defined(REX_CONFIG_NON_ARGUMENT_AS_LOCAL)
   PPCVRegister v32;
   PPCVRegister v33;
   PPCVRegister v34;
@@ -471,8 +416,6 @@ struct alignas(0x40) PPCContext {
   PPCVRegister v61;
   PPCVRegister v62;
   PPCVRegister v63;
-#endif
-#if !defined(REX_CONFIG_NON_VOLATILE_AS_LOCAL)
   PPCVRegister v64;
   PPCVRegister v65;
   PPCVRegister v66;
@@ -537,15 +480,13 @@ struct alignas(0x40) PPCContext {
   PPCVRegister v125;
   PPCVRegister v126;
   PPCVRegister v127;
-#endif
 
-#if !defined(REX_CONFIG_NON_VOLATILE_AS_LOCAL)
   //--- Non-volatile register save/restore --------
   // Layout: r14-r31 (144) | f14-f31 (144) | v14-v31 (288) | v64-v127 (1024)
-  // Total: 1600 bytes.  Buffer must be at least this large.
+  //       | cr2-cr4 (12) | fpscr (4).  Total: 1616 bytes.
   static constexpr size_t kNonVolatileSaveSize =
       18 * sizeof(PPCRegister) + 18 * sizeof(PPCRegister) + 18 * sizeof(PPCVRegister) +
-      64 * sizeof(PPCVRegister);
+      64 * sizeof(PPCVRegister) + 3 * sizeof(PPCCRRegister) + sizeof(PPCFPSCRRegister);
 
   inline void SaveNonVolatiles(uint8_t* dst) const {
     std::memcpy(dst, &r14, 18 * sizeof(PPCRegister));
@@ -555,6 +496,10 @@ struct alignas(0x40) PPCContext {
     std::memcpy(dst, &v14, 18 * sizeof(PPCVRegister));
     dst += 18 * sizeof(PPCVRegister);
     std::memcpy(dst, &v64, 64 * sizeof(PPCVRegister));
+    dst += 64 * sizeof(PPCVRegister);
+    std::memcpy(dst, &cr2, 3 * sizeof(PPCCRRegister));
+    dst += 3 * sizeof(PPCCRRegister);
+    std::memcpy(dst, &fpscr, sizeof(PPCFPSCRRegister));
   }
 
   inline void RestoreNonVolatiles(const uint8_t* src) {
@@ -565,12 +510,13 @@ struct alignas(0x40) PPCContext {
     std::memcpy(&v14, src, 18 * sizeof(PPCVRegister));
     src += 18 * sizeof(PPCVRegister);
     std::memcpy(&v64, src, 64 * sizeof(PPCVRegister));
+    src += 64 * sizeof(PPCVRegister);
+    std::memcpy(&cr2, src, 3 * sizeof(PPCCRRegister));
+    src += 3 * sizeof(PPCCRRegister);
+    PPCFPSCRRegister saved_fpscr;
+    std::memcpy(&saved_fpscr, src, sizeof(PPCFPSCRRegister));
+    fpscr.restoreGuestBits(saved_fpscr.csr);
   }
-#else
-  static constexpr size_t kNonVolatileSaveSize = 0;
-  inline void SaveNonVolatiles(uint8_t*) const {}
-  inline void RestoreNonVolatiles(const uint8_t*) {}
-#endif
 };
 
 namespace rex::ppc {

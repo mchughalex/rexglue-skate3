@@ -175,6 +175,7 @@ bool build_bctr(BuilderContext& ctx) {
         case TargetKind::Function:
         case TargetKind::Import:
           if (auto* targetFn = ctx.graph().getFunction(label)) {
+            ctx.emitCtx.reference(targetFn->name());
             ctx.println("\t\t{}(ctx, base);", targetFn->name());
           } else {
             REXCODEGEN_ERROR(

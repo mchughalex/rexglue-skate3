@@ -17,7 +17,6 @@
 #include <vector>
 
 #include <rex/graphics/shared_memory.h>
-#include <rex/graphics/trace_writer.h>
 #include <rex/memory.h>
 #include <rex/ui/d3d12/d3d12_api.h>
 #include <rex/ui/d3d12/d3d12_upload_buffer_pool.h>
@@ -28,8 +27,7 @@ class D3D12CommandProcessor;
 
 class D3D12SharedMemory : public SharedMemory {
  public:
-  D3D12SharedMemory(D3D12CommandProcessor& command_processor, memory::Memory& memory,
-                    TraceWriter& trace_writer);
+  D3D12SharedMemory(D3D12CommandProcessor& command_processor, memory::Memory& memory);
   ~D3D12SharedMemory() override;
 
   bool Initialize();
@@ -77,10 +75,6 @@ class D3D12SharedMemory : public SharedMemory {
   void WriteUintPow2UAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle,
                                   uint32_t element_size_bytes_pow2);
 
-  // Returns true if any downloads were submitted to the command processor.
-  bool InitializeTraceSubmitDownloads();
-  void InitializeTraceCompleteDownloads();
-
  protected:
   bool AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
                                         uint32_t length_allocations) override;
@@ -89,7 +83,6 @@ class D3D12SharedMemory : public SharedMemory {
 
  private:
   D3D12CommandProcessor& command_processor_;
-  TraceWriter& trace_writer_;
 
   // The 512 MB tiled buffer.
   ID3D12Resource* buffer_ = nullptr;
@@ -117,10 +110,6 @@ class D3D12SharedMemory : public SharedMemory {
   D3D12_CPU_DESCRIPTOR_HANDLE buffer_descriptor_heap_start_;
 
   std::unique_ptr<ui::d3d12::D3D12UploadBufferPool> upload_buffer_pool_;
-
-  // Created temporarily, only for downloading.
-  ID3D12Resource* trace_download_buffer_ = nullptr;
-  void ResetTraceDownload();
 };
 
 }  // namespace rex::graphics::d3d12

@@ -16,7 +16,6 @@
 #include <rex/assert.h>
 #include <rex/graphics/pipeline/shader/interpreter.h>
 #include <rex/graphics/registers.h>
-#include <rex/graphics/trace_writer.h>
 #include <rex/graphics/xenos.h>
 #include <rex/math.h>
 #include <rex/types.h>
@@ -962,9 +961,6 @@ void ShaderInterpreter::ExecuteVertexFetchInstruction(ucode::VertexFetchInstruct
       uint32_t dword_address_dwords = dword_0_address_dwords + i;
       if (dword_address_dwords >= fetch_constant.address &&
           dword_address_dwords < buffer_end_dwords) {
-        if (trace_writer_) {
-          trace_writer_->WriteMemoryRead(sizeof(uint32_t) * dword_address_dwords, sizeof(uint32_t));
-        }
         dword_value = xenos::GpuSwap(memory_dwords[dword_address_dwords], fetch_constant.endian);
       }
       data[i] = dword_value;

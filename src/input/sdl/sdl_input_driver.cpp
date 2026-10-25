@@ -24,6 +24,10 @@
 
 REXCVAR_DEFINE_STRING(hid_mappings_file, "gamecontrollerdb.txt", "Input",
                       "Path to SDL gamecontroller mappings file");
+REXCVAR_DEFINE_BOOL(hid_hide_steam_input_duplicates, true, "Input",
+                    "When Steam Input exposes its virtual gamepad, hide the physical Valve "
+                    "controllers it already stands for (Steam Deck, Steam Controller), so one "
+                    "pad does not show up as two players");
 REXCVAR_DEFINE_UINT32(hid_sdl_rumble_duration_ms, 100, "Input",
                       "SDL rumble pulse duration for nonzero XInput vibration");
 
@@ -36,8 +40,7 @@ SDLInputDriver::SDLInputDriver(rex::ui::Window* window, size_t window_z_order)
       sdl_events_unflushed_(0),
       sdl_pumpevents_queued_(false),
       controllers_(),
-      controllers_mutex_(),
-      keystroke_states_() {}
+      controllers_mutex_() {}
 
 SDLInputDriver::~SDLInputDriver() {}
 
@@ -131,13 +134,11 @@ void SDLInputDriver::OnClosing(rex::ui::UIEvent&) {
       attached_window_->app_context().CallInUIThreadSynchronous(
           [this]() { attached_window_->app_context().ExecutePendingFunctionsFromUIThread(); });
     }
-    for (size_t i = 0; i < controllers_.size(); i++) {
-      if (controllers_.at(i).sdl) {
-        StopRumbleLocked(controllers_.at(i));
-        SDL_CloseGamepad(controllers_.at(i).sdl);
-        controllers_.at(i) = {};
-      }
+    for (auto& controller : controllers_) {
+      StopRumbleLocked(controller);
+      SDL_CloseGamepad(controller.sdl);
     }
+    controllers_.clear();
     if (SDL_Gamepad_initialized_) {
       SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
       SDL_Gamepad_initialized_ = false;
@@ -154,10 +155,53 @@ void SDLInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {}
 
 void SDLInputDriver::OnGotFocus(rex::ui::UISetupEvent&) {}
 
-X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
-                                         X_INPUT_CAPABILITIES* out_caps) {
+void SDLInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
+  // Polling can start before the window exists and the subsystems are up.
+  if (!sdl_events_initialized_ || !SDL_Gamepad_initialized_) {
+    return;
+  }
+
+  auto guard = DrainAndLock();
+
+  // Under Steam (Steam Deck game mode, Big Picture) SDL can see both Steam
+  // Input's virtual gamepad and the Valve hardware behind it; both then get a
+  // guest user and every press acts twice. Keep the virtual pad, which carries
+  // the user's Steam Input configuration.
+  constexpr uint16_t kValveVendorId = 0x28DE;
+  constexpr uint16_t kSteamVirtualGamepadProductId = 0x11FF;
+  bool steam_virtual_present = false;
+  if (REXCVAR_GET(hid_hide_steam_input_duplicates)) {
+    for (const auto& controller : controllers_) {
+      if (SDL_GetGamepadVendor(controller.sdl) == kValveVendorId &&
+          SDL_GetGamepadProduct(controller.sdl) == kSteamVirtualGamepadProductId) {
+        steam_virtual_present = true;
+        break;
+      }
+    }
+  }
+
+  for (const auto& controller : controllers_) {
+    if (steam_virtual_present && SDL_GetGamepadVendor(controller.sdl) == kValveVendorId &&
+        SDL_GetGamepadProduct(controller.sdl) != kSteamVirtualGamepadProductId) {
+      continue;
+    }
+    DeviceInfo info;
+    info.id = controller.id;
+    const char* name = SDL_GetGamepadName(controller.sdl);
+    info.name = name ? name : "";
+    char guid_text[33] = {};
+    SDL_GUIDToString(SDL_GetJoystickGUID(SDL_GetGamepadJoystick(controller.sdl)), guid_text,
+                     static_cast<int>(sizeof(guid_text)));
+    info.guid = guid_text;
+    info.synthetic = false;
+    out.push_back(info);
+  }
+}
+
+X_RESULT SDLInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
+                                               X_INPUT_CAPABILITIES* out_caps) {
   assert(sdl_events_initialized_ && SDL_Gamepad_initialized_);
-  if (user_index >= HID_SDL_USER_COUNT || !out_caps) {
+  if (!out_caps) {
     return X_ERROR_BAD_ARGUMENTS;
   }
 
@@ -165,7 +209,7 @@ X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 
   auto guard = DrainAndLock();
 
-  auto controller = GetControllerState(user_index);
+  auto controller = FindController(id);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
@@ -179,11 +223,8 @@ X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT SDLInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+X_RESULT SDLInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   assert(sdl_events_initialized_ && SDL_Gamepad_initialized_);
-  if (user_index >= HID_SDL_USER_COUNT) {
-    return X_ERROR_BAD_ARGUMENTS;
-  }
 
   auto is_active = this->is_active();
 
@@ -193,7 +234,7 @@ X_RESULT SDLInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state)
 
   auto guard = DrainAndLock();
 
-  auto controller = GetControllerState(user_index);
+  auto controller = FindController(id);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
@@ -215,41 +256,37 @@ X_RESULT SDLInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state)
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT SDLInputDriver::GetStateUi(uint32_t user_index, X_INPUT_STATE* out_state) {
+X_RESULT SDLInputDriver::GetDeviceStateUi(DeviceId id, X_INPUT_STATE* out_state) {
   assert(sdl_events_initialized_ && SDL_Gamepad_initialized_);
-  if (user_index >= HID_SDL_USER_COUNT) {
-    return X_ERROR_BAD_ARGUMENTS;
-  }
 
   QueueControllerUpdate();
 
   auto guard = DrainAndLock();
 
-  auto controller = GetControllerState(user_index);
+  auto controller = FindController(id);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   // Raw state, no is_active gating, and no packet/state_changed bookkeeping -
-  // that belongs to the guest-facing GetState path.
+  // that belongs to the guest-facing GetDeviceState path.
   std::memcpy(out_state, &controller->state, sizeof(*out_state));
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT SDLInputDriver::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
+X_RESULT SDLInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) {
   assert(sdl_events_initialized_ && SDL_Gamepad_initialized_);
-  if (user_index >= HID_SDL_USER_COUNT) {
-    return X_ERROR_BAD_ARGUMENTS;
-  }
 
   QueueControllerUpdate();
 
   auto guard = DrainAndLock();
 
-  auto controller = GetControllerState(user_index);
+  auto controller = FindController(id);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
+  // Pulse rather than hold: a nonzero request rumbles for
+  // hid_sdl_rumble_duration_ms, and a zero request stops immediately.
   const bool has_rumble = vibration->left_motor_speed || vibration->right_motor_speed;
   const uint32_t duration_ms =
       has_rumble ? std::clamp(REXCVAR_GET(hid_sdl_rumble_duration_ms), uint32_t(1),
@@ -262,15 +299,11 @@ X_RESULT SDLInputDriver::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibrat
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
-                                      X_INPUT_KEYSTROKE* out_keystroke) {
+X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+                                            X_INPUT_KEYSTROKE* out_keystroke) {
   // TODO(JoelLinn): Figure out the flags
   // https://github.com/evilC/UCR/blob/0489929e2a8e39caa3484c67f3993d3fba39e46f/Libraries/XInput.ahk#L85-L98
   assert(sdl_events_initialized_ && SDL_Gamepad_initialized_);
-  bool user_any = users == 0xFF;
-  if (users >= HID_SDL_USER_COUNT && !user_any) {
-    return X_ERROR_BAD_ARGUMENTS;
-  }
   if (!out_keystroke) {
     return X_ERROR_BAD_ARGUMENTS;
   }
@@ -327,87 +360,81 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
 
   auto guard = DrainAndLock();
 
-  for (uint32_t user_index = (user_any ? 0 : users);
-       user_index < (user_any ? HID_SDL_USER_COUNT : users + 1); user_index++) {
-    auto controller = GetControllerState(user_index);
-    if (!controller) {
-      if (user_any) {
+  auto controller = FindController(id);
+  if (!controller) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
+  // If input is not active (e.g. due to a dialog overlay), force buttons to
+  // "unpressed". The algorithm will automatically send UP events when
+  // 'is_active()' goes low and DOWN events when it goes high again.
+  const uint64_t curr_butts =
+      is_active ? (static_cast<uint64_t>(static_cast<uint16_t>(controller->state.gamepad.buttons)) |
+                   AnalogToKeyfield(controller->state.gamepad))
+                : uint64_t(0);
+  KeystrokeState& last = controller->keystroke;
+
+  // Handle repeating
+  auto guest_now = rex::chrono::Clock::QueryGuestUptimeMillis();
+  static_assert(HID_SDL_REPEAT_DELAY >= HID_SDL_REPEAT_RATE);
+  if (last.repeat_state == RepeatState::Waiting &&
+      (last.repeat_time + HID_SDL_REPEAT_DELAY < guest_now)) {
+    last.repeat_state = RepeatState::Repeating;
+  }
+  if (last.repeat_state == RepeatState::Repeating &&
+      (last.repeat_time + HID_SDL_REPEAT_RATE < guest_now)) {
+    last.repeat_time = guest_now;
+    rex::ui::VirtualKey vk = kVkLookup.at(last.repeat_butt_idx);
+    assert_true(vk != rex::ui::VirtualKey::kNone);
+    out_keystroke->virtual_key = uint16_t(vk);
+    out_keystroke->unicode = 0;
+    // InputSystem stamps the guest user this device is assigned to.
+    out_keystroke->user_index = 0;
+    out_keystroke->hid_code = 0;
+    out_keystroke->flags = X_INPUT_KEYSTROKE_KEYDOWN | X_INPUT_KEYSTROKE_REPEAT;
+    return X_ERROR_SUCCESS;
+  }
+
+  auto butts_changed = curr_butts ^ last.buttons;
+  if (!butts_changed) {
+    return X_ERROR_EMPTY;
+  }
+
+  // First try to clear buttons with up events. This is to match xinput
+  // behavior when transitioning thumb sticks, e.g. so that THUMB_UPLEFT is
+  // up before THUMB_LEFT is down.
+  for (auto [clear_pass, pass] = std::tuple{true, 0}; pass < 2; clear_pass = false, pass++) {
+    for (uint8_t i = 0; i < uint8_t(std::size(kVkLookup)); i++) {
+      auto fbutton = uint64_t(1) << i;
+      if (!(butts_changed & fbutton)) {
         continue;
-      } else {
-        return X_ERROR_DEVICE_NOT_CONNECTED;
       }
-    }
+      rex::ui::VirtualKey vk = kVkLookup.at(i);
+      if (vk == rex::ui::VirtualKey::kNone) {
+        continue;
+      }
 
-    // If input is not active (e.g. due to a dialog overlay), force buttons to
-    // "unpressed". The algorithm will automatically send UP events when
-    // `is_active()` goes low and DOWN events when it goes high again.
-    const uint64_t curr_butts =
-        is_active
-            ? (controller->state.gamepad.buttons | AnalogToKeyfield(controller->state.gamepad))
-            : uint64_t(0);
-    KeystrokeState& last = keystroke_states_.at(user_index);
-
-    // Handle repeating
-    auto guest_now = rex::chrono::Clock::QueryGuestUptimeMillis();
-    static_assert(HID_SDL_REPEAT_DELAY >= HID_SDL_REPEAT_RATE);
-    if (last.repeat_state == RepeatState::Waiting &&
-        (last.repeat_time + HID_SDL_REPEAT_DELAY < guest_now)) {
-      last.repeat_state = RepeatState::Repeating;
-    }
-    if (last.repeat_state == RepeatState::Repeating &&
-        (last.repeat_time + HID_SDL_REPEAT_RATE < guest_now)) {
-      last.repeat_time = guest_now;
-      rex::ui::VirtualKey vk = kVkLookup.at(last.repeat_butt_idx);
-      assert_true(vk != rex::ui::VirtualKey::kNone);
       out_keystroke->virtual_key = uint16_t(vk);
       out_keystroke->unicode = 0;
-      out_keystroke->user_index = user_index;
+      out_keystroke->user_index = 0;
       out_keystroke->hid_code = 0;
-      out_keystroke->flags = X_INPUT_KEYSTROKE_KEYDOWN | X_INPUT_KEYSTROKE_REPEAT;
-      return X_ERROR_SUCCESS;
-    }
 
-    auto butts_changed = curr_butts ^ last.buttons;
-    if (!butts_changed) {
-      continue;
-    }
-
-    // First try to clear buttons with up events. This is to match xinput
-    // behaviour when transitioning thumb sticks, e.g. so that THUMB_UPLEFT is
-    // up before THUMB_LEFT is down.
-    for (auto [clear_pass, i] = std::tuple{true, 0}; i < 2; clear_pass = false, i++) {
-      for (uint8_t i = 0; i < uint8_t(std::size(kVkLookup)); i++) {
-        auto fbutton = uint64_t(1) << i;
-        if (!(butts_changed & fbutton)) {
-          continue;
-        }
-        rex::ui::VirtualKey vk = kVkLookup.at(i);
-        if (vk == rex::ui::VirtualKey::kNone) {
-          continue;
-        }
-
-        out_keystroke->virtual_key = uint16_t(vk);
-        out_keystroke->unicode = 0;
-        out_keystroke->user_index = user_index;
-        out_keystroke->hid_code = 0;
-
-        bool is_pressed = curr_butts & fbutton;
-        if (clear_pass && !is_pressed) {
-          // up
-          out_keystroke->flags = X_INPUT_KEYSTROKE_KEYUP;
-          last.buttons &= ~fbutton;
-          last.repeat_state = RepeatState::Idle;
-          return X_ERROR_SUCCESS;
-        }
-        if (!clear_pass && is_pressed) {
-          // down
-          out_keystroke->flags = X_INPUT_KEYSTROKE_KEYDOWN;
-          last.buttons |= fbutton;
-          last.repeat_state = RepeatState::Waiting;
-          last.repeat_butt_idx = i;
-          last.repeat_time = guest_now;
-          return X_ERROR_SUCCESS;
-        }
+      bool is_pressed = curr_butts & fbutton;
+      if (clear_pass && !is_pressed) {
+        // up
+        out_keystroke->flags = X_INPUT_KEYSTROKE_KEYUP;
+        last.buttons &= ~fbutton;
+        last.repeat_state = RepeatState::Idle;
+        return X_ERROR_SUCCESS;
+      }
+      if (!clear_pass && is_pressed) {
+        // down
+        out_keystroke->flags = X_INPUT_KEYSTROKE_KEYDOWN;
+        last.buttons |= fbutton;
+        last.repeat_state = RepeatState::Waiting;
+        last.repeat_butt_idx = i;
+        last.repeat_time = guest_now;
+        return X_ERROR_SUCCESS;
       }
     }
   }
@@ -474,8 +501,7 @@ void SDLInputDriver::StopRumbleLocked(ControllerState& state) {
 }
 
 void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
-  // Open the controller.
-  const auto controller = SDL_OpenGamepad(event.cdevice.which);
+  const auto controller = SDL_OpenGamepad(event.gdevice.which);
   if (!controller) {
     assert_always();
     return;
@@ -490,59 +516,48 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
       static_cast<int>(SDL_GetJoystickType(SDL_GetGamepadJoystick(controller))),
       static_cast<int>(SDL_GetGamepadType(controller)), SDL_GetGamepadVendor(controller),
       SDL_GetGamepadProduct(controller));
-  int user_id = -1;
-  // Check if the controller has a player index LED.
-  user_id = SDL_GetGamepadPlayerIndex(controller);
-  // Is that id already taken?
-  if (user_id < 0 || user_id >= static_cast<int>(controllers_.size()) ||
-      controllers_.at(user_id).sdl) {
-    user_id = -1;
-  }
-  // No player index or already taken, just take the first free slot.
-  if (user_id < 0) {
-    for (size_t i = 0; i < controllers_.size(); i++) {
-      if (!controllers_.at(i).sdl) {
-        user_id = static_cast<int>(i);
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-        SDL_SetGamepadPlayerIndex(controller, user_id);
-#endif
-        break;
-      }
-    }
-  }
-  if (user_id >= 0) {
-    auto& state = controllers_.at(user_id);
-    state = {controller, {}};
-    // XInput seems to start with packet_number = 1 .
-    state.state_changed = true;
-    UpdateXCapabilities(state);
 
-    REXLOG_INFO("SDL OnControllerDeviceAdded: Added at index {}.", user_id);
-  } else {
-    // No more controllers needed, close it.
-    SDL_CloseGamepad(controller);
-    REXLOG_WARN("SDL OnControllerDeviceAdded: Ignored. No free slots.");
-  }
+  // SDL_GetGamepadPlayerIndex is deliberately ignored: on Windows it reports
+  // the XInput user index the OS assigned, which is unrelated to connection
+  // order and leaves non-XInput pads unnumbered.
+  ControllerState state = {};
+  state.sdl = controller;
+  state.id = AllocateDeviceId();
+  state.state_changed = true;  // XInput starts with packet_number = 1
+  UpdateXCapabilities(state);
+  controllers_.push_back(state);
+
+  const int ordinal = static_cast<int>(controllers_.size()) - 1;
+  SDL_SetGamepadPlayerIndex(controller, ordinal);
+
+  REXLOG_INFO("SDL OnControllerDeviceAdded: connection order {}, device {}.", ordinal,
+              static_cast<uint64_t>(state.id));
 }
 
 void SDLInputDriver::OnControllerDeviceRemovedLocked(const SDL_Event& event) {
-  // Find the disconnected gamecontroller and close it.
-  auto idx = GetControllerIndexFromInstanceID(event.cdevice.which);
-  if (idx) {
-    StopRumbleLocked(controllers_.at(*idx));
-    SDL_CloseGamepad(controllers_.at(*idx).sdl);
-    controllers_.at(*idx) = {};
-    keystroke_states_.at(*idx) = {};
-    REXLOG_INFO("SDL OnControllerDeviceRemoved: Removed at player index {}.", *idx);
-  } else {
-    // Can happen in case all slots where full previously.
-    REXLOG_WARN("SDL OnControllerDeviceRemoved: Ignored. Unused device.");
+  auto idx = GetControllerIndexFromInstanceID(event.gdevice.which);
+  if (!idx) {
+    REXLOG_WARN("SDL OnControllerDeviceRemoved: Ignored. Unknown device.");
+    return;
   }
+  StopRumbleLocked(controllers_.at(*idx));
+  SDL_CloseGamepad(controllers_.at(*idx).sdl);
+  controllers_.erase(controllers_.begin() + static_cast<ptrdiff_t>(*idx));
+
+  // LEDs only. Guest user assignment does not shift, because InputSystem holds
+  // each device's ordinal.
+  for (size_t i = 0; i < controllers_.size(); i++) {
+    SDL_SetGamepadPlayerIndex(controllers_[i].sdl, static_cast<int>(i));
+  }
+  REXLOG_INFO("SDL OnControllerDeviceRemoved: {} device(s) remain.", controllers_.size());
 }
 
 void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event) {
   auto idx = GetControllerIndexFromInstanceID(event.gaxis.which);
-  assert(idx);
+  if (!idx) {
+    // The pad can be removed between the event being posted and drained.
+    return;
+  }
   auto& pad = controllers_.at(*idx).state.gamepad;
   switch (event.gaxis.axis) {
     case SDL_GAMEPAD_AXIS_LEFTX:
@@ -607,7 +622,10 @@ void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& even
   static_assert(SDL_GAMEPAD_BUTTON_DPAD_RIGHT == 14);
 
   auto idx = GetControllerIndexFromInstanceID(event.gdevice.which);
-  assert(idx);
+  if (!idx) {
+    // The pad can be removed between the event being posted and drained.
+    return;
+  }
   auto& controller = controllers_.at(*idx);
 
   uint16_t xbuttons = controller.state.gamepad.buttons;
@@ -635,9 +653,6 @@ std::optional<size_t> SDLInputDriver::GetControllerIndexFromInstanceID(SDL_Joyst
   // Loop through our controllers and try to match the given ID.
   for (size_t i = 0; i < controllers_.size(); i++) {
     auto controller = controllers_.at(i).sdl;
-    if (!controller) {
-      continue;
-    }
     auto joystick = SDL_GetGamepadJoystick(controller);
     assert(joystick);
     auto joy_instance_id = SDL_GetJoystickID(joystick);
@@ -649,20 +664,25 @@ std::optional<size_t> SDLInputDriver::GetControllerIndexFromInstanceID(SDL_Joyst
   return std::nullopt;
 }
 
-SDLInputDriver::ControllerState* SDLInputDriver::GetControllerState(uint32_t user_index) {
-  if (user_index >= controllers_.size()) {
+SDLInputDriver::ControllerState* SDLInputDriver::FindController(DeviceId id) {
+  if (id == DeviceId::kInvalid) {
     return nullptr;
   }
-  auto controller = &controllers_.at(user_index);
-  if (!controller->sdl) {
-    return nullptr;
+  for (auto& controller : controllers_) {
+    if (controller.id == id) {
+      return &controller;
+    }
   }
-  return controller;
+  return nullptr;
+}
+
+DeviceId SDLInputDriver::AllocateDeviceId() {
+  return static_cast<DeviceId>(next_device_id_++);
 }
 
 bool SDLInputDriver::TestSDLVersion() const {
-  REXLOG_INFO("SDL: Using version {}.{}.{}", SDL_MAJOR_VERSION, SDL_MINOR_VERSION,
-              SDL_MICRO_VERSION);
+  REXLOG_DEBUG("SDL: Using version {}.{}.{}", SDL_MAJOR_VERSION, SDL_MINOR_VERSION,
+               SDL_MICRO_VERSION);
   return true;
 }
 

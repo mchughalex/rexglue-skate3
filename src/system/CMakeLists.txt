@@ -1,5 +1,8 @@
 set(REXSYSTEM_SOURCES
     runtime.cpp
+    embedded_metadata.cpp
+    achievement_manager.cpp
+    achievements.cpp
     kernel_state.cpp
     xmemory.cpp
     kernel_module.cpp
@@ -17,7 +20,6 @@ set(REXSYSTEM_SOURCES
     xsymboliclink.cpp
     xobject.cpp
     xmodule.cpp
-    shared_library.cpp
     guest_path.cpp
 
     # Utilities
@@ -40,6 +42,7 @@ set(REXSYSTEM_SOURCES
     map_parser.cpp
     module.cpp
     function_dispatcher.cpp
+    gpu_plugin_loader.cpp
     thread.cpp
     thread_state.cpp
     xex_module.cpp
@@ -52,8 +55,22 @@ add_library(rex::kernel ALIAS rexruntime)
 
 set_target_properties(rexruntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
 
+rex_target_pch(rexruntime
+    <mutex>
+    <unordered_map>
+    <rex/math.h>
+    <rex/string.h>
+    <rex/memory.h>
+    <rex/filesystem.h>
+    <rex/thread.h>
+    <rex/thread/mutex.h>
+    <rex/ppc/context.h>
+    <rex/system/kernel_state.h>
+)
+
 target_include_directories(rexruntime PUBLIC
     $<BUILD_INTERFACE:${REXGLUE_ROOT}/include>
+    $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_include_directories(rexruntime PRIVATE
@@ -70,10 +87,15 @@ target_link_libraries(rexruntime
     PRIVATE
         aes128
         mspack
+        xxHash::xxhash
 )
 
 if(REXGLUE_ENABLE_TRACY)
-    target_link_libraries(rexruntime PUBLIC TracyClient)
+    # TARGET_NAME is what tells install(EXPORT) this text is a target to
+    # namespace. Without it the plain name survives into the installed config
+    # and consumers link a bare TracyClient they have no search path for.
+    target_link_libraries(rexruntime PUBLIC
+        $<$<NOT:$<CONFIG:Release>>:$<TARGET_NAME:TracyClient>>)
     target_compile_definitions(rexruntime PUBLIC
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)
 endif()
@@ -114,17 +136,19 @@ if(WIN32)
         @ONLY)
     target_sources(rexruntime PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}/rexruntime_version.rc)
+    target_link_libraries(rexruntime PUBLIC dxgi dxguid)
+    target_compile_definitions(rexruntime PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
 if(REXGLUE_USE_D3D12)
-    target_link_libraries(rexruntime PUBLIC dxgi dxguid dxc-headers)
+    target_link_libraries(rexruntime PUBLIC dxc-headers)
     target_compile_definitions(rexruntime PUBLIC REX_HAS_D3D12=1)
 endif()
 if(REXGLUE_USE_VULKAN)
     target_link_libraries(rexruntime PUBLIC
-        volk::volk
+        Vulkan::Headers
         GPUOpen::VulkanMemoryAllocator
-        SPIRV-Tools-static
+        spirv-tools-headers
     )
     target_compile_definitions(rexruntime PUBLIC REX_HAS_VULKAN=1)
 endif()

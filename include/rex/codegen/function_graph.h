@@ -63,6 +63,13 @@ class FunctionGraph {
   FunctionNode* addFunction(uint32_t base, uint32_t size, FunctionAuthority authority,
                             std::string_view name, bool hasXrefs = false);
 
+  // Batch adds: between these calls addFunction does not notify PENDING
+  // functions one add at a time; flushDeferredAddNotifications resolves them
+  // against every function added in the batch in one pass. Same result, but
+  // linear instead of (adds x functions) - GapFill adds tens of thousands.
+  void beginDeferredAddNotifications();
+  void flushDeferredAddNotifications();
+
   // Add a resolved import as a callable function with __imp__ name
   // Address is the thunk address that bl instructions target
   FunctionNode* addImportFunction(uint32_t address, std::string_view resolvedName);
@@ -182,6 +189,10 @@ class FunctionGraph {
   // Check if target is a mergeable entry point (DISCOVERED with xrefs)
   bool isMergeableEntryPoint(uint32_t addr) const;
 
+  // Flag every SEH funclet as register-sharing. Run after discovery, once
+  // funclet extents are known. Returns the number flagged.
+  size_t markFuncletRegisterSharing();
+
   //=========================================================================
   // Target Classification (for code generation)
   //=========================================================================
@@ -204,8 +215,13 @@ class FunctionGraph {
   std::string symbolPrefix_;
   MemoryReader memoryReader_;
 
+  bool deferAddNotifications_ = false;
+  std::vector<uint32_t> deferredAddedBases_;
+
   // Notify all PENDING functions that a new function was added
   void notifyFunctionAdded(FunctionNode* newFunction);
+  // Resolve one PENDING function's jumps that target newFunction
+  void resolvePendingAgainst(FunctionNode* node, FunctionNode* newFunction);
 };
 
 }  // namespace rex::codegen

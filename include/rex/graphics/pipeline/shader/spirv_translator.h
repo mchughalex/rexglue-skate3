@@ -991,11 +991,17 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id main_memexport_allowed_;
   // VS rectangle-list fallback only - uint.
   spv::Id var_main_rectangle_guest_vertex_index_;
-  // VS rectangle-list fallback only - float4[3].
-  spv::Id var_main_rectangle_position_;
-  // VS rectangle-list fallback only - float[3 * distance_count], when needed.
-  spv::Id var_main_rectangle_clip_distances_;
-  spv::Id var_main_rectangle_cull_distances_;
+  // VS rectangle-list fallback only - float4[3] (gl_Position). Not the
+  // gl_PerVertex block type, whose BuiltIn member decorations are only valid
+  // for Input and Output variables.
+  spv::Id var_main_rectangle_per_vertex_;
+  // One per user clip plane, plus one more cull distance for vertex killing.
+  static constexpr size_t kMaxRectanglePerVertexDistances = 8;
+  // VS rectangle-list fallback only - float[3] for each clip and cull distance.
+  // Separate variables rather than one float[3][count], to keep the
+  // ArrayStride-decorated gl_PerVertex member type out of Function storage.
+  std::array<spv::Id, kMaxRectanglePerVertexDistances> var_main_rectangle_clip_distances_;
+  std::array<spv::Id, kMaxRectanglePerVertexDistances> var_main_rectangle_cull_distances_;
   // VS rectangle-list fallback only - float4[3] for each used interpolator.
   std::array<spv::Id, xenos::kMaxInterpolators> var_main_rectangle_interpolators_;
   // VS only - float3 (special exports).

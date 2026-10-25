@@ -82,8 +82,17 @@ function Invoke-ReXSetup {
     Write-Host ""
     Write-Host "Toolchain:"
 
-    $required = @("pwsh", "clang++", "clang-format", "cmake", "ninja")
+    $required = @("pwsh", "clang++", "cmake", "ninja")
     $optional = @("clang-tidy", "cmake-format")
+
+    # Pinned via scripts/requirements-dev.txt, not taken from PATH.
+    try {
+        $clangFormat = Get-ReXClangFormat
+        $ver = & $clangFormat --version 2>&1 | Select-Object -First 1
+        Write-Host "  [OK]   clang-format: $ver (pinned)"
+    } catch {
+        Write-Host "  [MISS] clang-format (required): $($_.Exception.Message)"
+    }
 
     foreach ($tool in $required) {
         $cmd = Get-Command $tool -ErrorAction SilentlyContinue

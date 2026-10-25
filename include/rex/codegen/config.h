@@ -48,6 +48,11 @@ struct FunctionConfig {
   std::string name;     // Custom symbol name (empty = auto-generate sub_XXXXXXXX)
   uint32_t parent = 0;  // Parent function address (0 = standalone, non-zero = chunk)
 
+  // Keep non-volatiles in ctx instead of localizing them. Marks an MSVC SEH
+  // funclet, which reads the registers its owner left live and would see a zero
+  // from a local. Callers sync their localized copies across the call site.
+  bool shareRegisters = false;
+
   // Get effective size (prefers size over end)
   uint32_t getSize(uint32_t address) const {
     return size ? size : (end > address ? end - address : 0);
@@ -79,9 +84,9 @@ struct RecompilerConfig {
   std::string outDirectoryPath;     ///< Output directory for generated code
   std::string templateDir;          ///< Optional custom template directory for overrides
 
-  // Patch file paths (TODO: implement patching workflow)
-  std::string patchFilePath;
-  std::string patchedFilePath;
+  /// Every TOML that fed this config, in load order. LoadFromTable() gets a
+  /// parsed table, so a manifest-embedded entry omits the manifest itself.
+  std::vector<std::string> loadedFiles;
 
   // === Code generation options (optional) ===
   bool skipLr = false;

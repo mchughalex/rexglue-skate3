@@ -26,7 +26,6 @@
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/shared_memory.h>
-#include <rex/graphics/trace_writer.h>
 #include <rex/graphics/xenos.h>
 #include <rex/math.h>
 #include <rex/memory.h>
@@ -197,11 +196,8 @@ class PrimitiveProcessor {
       sizeof(uint32_t) * (UINT16_MAX - 2) * 3 * +XE_GPU_PRIMITIVE_PROCESSOR_SIMD_SIZE;
 
   PrimitiveProcessor(const RegisterFile& register_file, memory::Memory& memory,
-                     TraceWriter& trace_writer, SharedMemory& shared_memory)
-      : register_file_(register_file),
-        memory_(memory),
-        trace_writer_(trace_writer),
-        shared_memory_(shared_memory) {}
+                     SharedMemory& shared_memory)
+      : register_file_(register_file), memory_(memory), shared_memory_(shared_memory) {}
 
   // Call from the backend-specific initialization function.
   // - full_32bit_vertex_indices_supported:
@@ -629,7 +625,6 @@ class PrimitiveProcessor {
 
   const RegisterFile& register_file_;
   memory::Memory& memory_;
-  TraceWriter& trace_writer_;
   SharedMemory& shared_memory_;
 
   bool full_32bit_vertex_indices_used_ = false;

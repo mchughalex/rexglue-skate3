@@ -119,7 +119,7 @@ float Float7e3To32(uint32_t f10) {
     exponent = uint32_t(1 - int32_t(mantissa_lzcnt));
     mantissa = (mantissa << mantissa_lzcnt) & 0x7F;
   }
-  return rex::memory::Reinterpret<float>(uint32_t(((exponent + 124) << 23) | (mantissa << 3)));
+  return rex::memory::Reinterpret<float>(uint32_t(((exponent + 124) << 23) | (mantissa << 16)));
 }
 
 // Based on CFloat24 from d3dref9.dll and the 6e4 code from:

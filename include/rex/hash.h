@@ -12,6 +12,9 @@
 #pragma once
 
 #include <cstddef>
+#include <filesystem>
+#include <string>
+#include <string_view>
 
 // Enable inline implementations and advanced API (XXH3)
 #ifndef XXH_INLINE_ALL
@@ -41,5 +44,13 @@ struct XXHasher {
     return static_cast<size_t>(XXH3_64bits(&key, sizeof(key)));
   }
 };
+
+/// 128-bit XXH3 digest as a 32-character lowercase hex string. For fingerprints
+/// and cache keys, not for anything security bearing.
+std::string hash_bytes(std::string_view data);
+
+/// Same digest over a file's contents, streamed in chunks. Empty string when
+/// the file cannot be opened.
+std::string hash_file(const std::filesystem::path& path);
 
 }  // namespace rex

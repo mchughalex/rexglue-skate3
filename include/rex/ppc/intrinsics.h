@@ -354,8 +354,8 @@ inline simde__m128i simde_mm_vsl(simde__m128i a, simde__m128i b) {
   int64x2_t shift_vector = vdupq_n_s64(shift);
   uint64x2_t low_shifted = vshlq_u64(va, shift_vector);
 
-  // For the carry, we need right shift
-  int64x2_t rshift_vector = vdupq_n_s64(64 - shift);
+  // NEON vshl uses negative counts for right shifts.
+  int64x2_t rshift_vector = vdupq_n_s64(shift - 64);
   uint64x2_t high_carry = vshlq_u64(va, rshift_vector);
 
   // Combine results

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <vector>
 
@@ -225,7 +226,7 @@ u32 NtSuspendThread_entry(u32 handle, mapped_u32 suspend_count_ptr) {
     }
 
     REXKRNL_TRACE("[NtSuspendThread] handle={:08X} thread={}", uint32_t(handle), thread->name());
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
     auto* current_thread = XThread::GetCurrentThread();
     bool is_self_suspend = current_thread && current_thread == thread.get();
     if (is_self_suspend) {
@@ -966,8 +967,9 @@ static void xeKfLowerIrql(PPCContext* ctx, unsigned char new_irql) {
 uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock, bool change_irql) {
   uint32_t old_irql = change_irql ? xeKfRaiseIrql(ctx, IRQL_DISPATCH) : 0;
   uint32_t pcr_addr = static_cast<uint32_t>(ctx->r13.u64);
-  assert_true(lock->prcb_of_owner != rex::byte_swap(pcr_addr));  // deadlock detection
-  while (!rex::thread::atomic_cas(0u, rex::byte_swap(pcr_addr), &lock->prcb_of_owner.value)) {
+  const uint32_t self = rex::byte_swap(pcr_addr);
+  assert_true(lock->prcb_of_owner.value != self);  // self-deadlock detection
+  while (!rex::thread::atomic_cas(0u, self, &lock->prcb_of_owner.value)) {
     rex::thread::MaybeYield();
   }
   return old_irql;

@@ -11,7 +11,9 @@
 
 #include "ppc/instruction.h"
 
+#include <algorithm>
 #include <unordered_set>
+#include <vector>
 
 #include <rex/codegen/phases.h>
 #include "phase_helpers.h"
@@ -135,6 +137,8 @@ void gapFillCodeRegions(CodegenContext& ctx) {
   size_t gapsFound = 0;
   size_t segmentsCreated = 0;
 
+  graph.beginDeferredAddNotifications();
+
   for (const auto& region : scan.codeRegions) {
     // Split region on terminators (blr, tail calls), then check each segment
     auto segments = splitRegionOnTerminators(region, binary, knownCallables);
@@ -164,6 +168,8 @@ void gapFillCodeRegions(CodegenContext& ctx) {
     gapsFound++;
   }
 
+  graph.flushDeferredAddNotifications();
+
   if (segmentsCreated > 0) {
     REXCODEGEN_TRACE("Analyze: registered {} gap functions from {} regions", segmentsCreated,
                      gapsFound);
@@ -180,23 +186,43 @@ void cleanupAbsorbedGapFills(CodegenContext& ctx) {
   auto& graph = ctx.graph;
   std::vector<uint32_t> toRemove;
 
+  // containsAddress(addr) needs base() <= addr < end(), so index functions by
+  // base with a running maximum of end() and test only those whose extent can
+  // cover addr, instead of every function for every GAP_FILL one.
+  struct Extent {
+    uint32_t base;
+    uint32_t end;
+    const FunctionNode* node;
+  };
+  std::vector<Extent> extents;
+  extents.reserve(graph.functions().size());
+  for (const auto& [addr, node] : graph.functions()) {
+    extents.push_back({node->base(), node->end(), node.get()});
+  }
+  std::sort(extents.begin(), extents.end(),
+            [](const Extent& a, const Extent& b) { return a.base < b.base; });
+  std::vector<uint32_t> maxEndUpTo(extents.size());
+  for (size_t i = 0; i < extents.size(); ++i) {
+    maxEndUpTo[i] = std::max(extents[i].end, i ? maxEndUpTo[i - 1] : 0u);
+  }
+
   for (const auto& [addr, node] : graph.functions()) {
     if (node->authority() != FunctionAuthority::GAP_FILL)
       continue;
 
-    for (const auto& [otherAddr, otherNode] : graph.functions()) {
+    auto it = std::upper_bound(extents.begin(), extents.end(), addr,
+                               [](uint32_t value, const Extent& e) { return value < e.base; });
+    for (size_t i = size_t(it - extents.begin()); i-- > 0 && maxEndUpTo[i] > addr;) {
+      const FunctionNode* otherNode = extents[i].node;
+      const uint32_t otherAddr = extents[i].base;
       if (otherAddr == addr)
         continue;
       if (!otherNode->containsAddress(addr))
         continue;
 
-      // This GAP_FILL is inside another function's blocks
-      if (otherNode->authority() != FunctionAuthority::GAP_FILL) {
-        // Absorbed by higher authority - remove
-        toRemove.push_back(addr);
-        break;
-      } else if (otherAddr < addr) {
-        // Both GAP_FILL, other has lower address - it survives
+      // This GAP_FILL is inside another function's blocks: absorbed by higher
+      // authority, or by another GAP_FILL with a lower address that survives.
+      if (otherNode->authority() != FunctionAuthority::GAP_FILL || otherAddr < addr) {
         toRemove.push_back(addr);
         break;
       }

@@ -5,6 +5,7 @@ add_library(rexaudio OBJECT
     
     audio_driver.cpp
     audio_system.cpp
+    downmix.cpp
     xma_context.cpp
     xma_decoder.cpp
     xma_register_file.cpp
@@ -15,6 +16,19 @@ add_library(rexaudio OBJECT
     sdl/sdl_audio_driver.cpp
 )
 add_library(rex::audio ALIAS rexaudio)
+
+rex_target_pch(rexaudio
+    <mutex>
+    <rex/math.h>
+    <rex/string.h>
+    <rex/memory.h>
+    <rex/filesystem.h>
+    <rex/thread.h>
+    <rex/thread/mutex.h>
+    <rex/ppc/context.h>
+    <rex/system/kernel_state.h>
+    <rex/system/xthread.h>
+)
 
 target_include_directories(rexaudio PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>

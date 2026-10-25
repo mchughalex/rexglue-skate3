@@ -12,7 +12,9 @@
 
 #include <cstddef>
 #include <functional>
+#include <vector>
 
+#include <rex/input/device.h>
 #include <rex/input/input.h>
 #include <rex/kernel.h>
 #include <rex/ui/window.h>
@@ -31,21 +33,25 @@ class InputDriver {
 
   virtual X_STATUS Setup() = 0;
 
-  virtual X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
-                                   X_INPUT_CAPABILITIES* out_caps) = 0;
-  virtual X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state) = 0;
+  /// Devices this driver has open, in its own arrival order. InputSystem
+  /// assigns the cross-driver ordinal, so leave DeviceInfo::ordinal at zero.
+  virtual void EnumerateDevices(std::vector<DeviceInfo>& out) = 0;
+
+  virtual X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) = 0;
   // Raw pad state for host UI overlays (settings navigation). Unlike
-  // GetState, this must NOT be gated on is_active() - it is exactly the path
-  // used while guest input is suppressed by an open overlay. Drivers that
-  // self-gate GetState override this; drivers that emulate a pad from
+  // GetDeviceState, this must NOT be gated on is_active() - it is exactly the
+  // path used while guest input is suppressed by an open overlay. Drivers that
+  // self-gate GetDeviceState override this; drivers that emulate a pad from
   // keyboard/mouse override it to report not-connected (the host UI already
   // receives keyboard/mouse directly).
-  virtual X_RESULT GetStateUi(uint32_t user_index, X_INPUT_STATE* out_state) {
-    return GetState(user_index, out_state);
+  virtual X_RESULT GetDeviceStateUi(DeviceId id, X_INPUT_STATE* out_state) {
+    return GetDeviceState(id, out_state);
   }
-  virtual X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) = 0;
-  virtual X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
-                                X_INPUT_KEYSTROKE* out_keystroke) = 0;
+  virtual X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
+                                         X_INPUT_CAPABILITIES* out_caps) = 0;
+  virtual X_RESULT SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) = 0;
+  virtual X_RESULT GetDeviceKeystroke(DeviceId id, uint32_t flags,
+                                      X_INPUT_KEYSTROKE* out_keystroke) = 0;
 
   virtual void OnWindowAvailable(rex::ui::Window* /*window*/) {}
 

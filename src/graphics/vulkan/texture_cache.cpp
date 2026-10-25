@@ -117,12 +117,16 @@ namespace shaders {
 #include "../shaders/vulkan_spirv/texture_load_r16_unorm_float_scaled_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_r4g4b4a4_a4r4g4b4_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_r4g4b4a4_a4r4g4b4_scaled_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_r4g4b4a4_rgba8_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_r4g4b4a4_rgba8_scaled_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_r5g5b5a1_b5g5r5a1_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_r5g5b5a1_b5g5r5a1_scaled_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_r5g5b6_b5g6r5_swizzle_rbga_scaled_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_r5g6b5_b5g6r5_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_r5g6b5_b5g6r5_scaled_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_r5g6b5_rgba8_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_r5g6b5_rgba8_scaled_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_rg16_snorm_float_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_rg16_snorm_float_scaled_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_rg16_unorm_float_cs.h"
@@ -3326,6 +3330,30 @@ bool VulkanTextureCache::Initialize() {
     host_format_bgrg.format_unsigned.block_compressed = false;
     host_format_bgrg.unsigned_signed_compatible = false;
   }
+  // Expand R5G6B5 while loading if the native packed format can't be sampled.
+  HostFormatPair& host_format_r5g6b5 = host_formats_[uint32_t(xenos::TextureFormat::k_5_6_5)];
+  assert_true(host_format_r5g6b5.format_unsigned.format == VK_FORMAT_R5G6B5_UNORM_PACK16);
+  ifn.vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_R5G6B5_UNORM_PACK16,
+                                          &format_properties);
+  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) != kLinearFilterFeatures) {
+    host_format_r5g6b5.format_unsigned.load_shader = kLoadShaderIndexR5G6B5ToRGBA8;
+    host_format_r5g6b5.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
+    host_format_r5g6b5.format_unsigned.block_compressed = false;
+    host_format_r5g6b5.unsigned_signed_compatible = false;
+  }
+  // MoltenVK doesn't expose B4G4R4A4 sampling on all Metal devices. Expand
+  // guest RGBA4444 texels to the universally supported RGBA8 format while
+  // loading them instead of dropping the texture binding entirely.
+  HostFormatPair& host_format_rgba4 = host_formats_[uint32_t(xenos::TextureFormat::k_4_4_4_4)];
+  assert_true(host_format_rgba4.format_unsigned.format == VK_FORMAT_B4G4R4A4_UNORM_PACK16);
+  ifn.vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_B4G4R4A4_UNORM_PACK16,
+                                          &format_properties);
+  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) != kLinearFilterFeatures) {
+    host_format_rgba4.format_unsigned.load_shader = kLoadShaderIndexRGBA4ToRGBA8;
+    host_format_rgba4.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
+    host_format_rgba4.format_unsigned.block_compressed = false;
+    host_format_rgba4.unsigned_signed_compatible = false;
+  }
   // k_10_11_11, k_11_11_10 (+ _AS_16_16_16_16 variants) - if normalized
   // R16G16B16A16 is not linearly filterable, decode to normalized 16-bit in a
   // scratch buffer first, then convert it to float16 in-place in a second pass
@@ -3806,12 +3834,16 @@ bool VulkanTextureCache::Initialize() {
                      sizeof(shaders::texture_load_r5g5b5a1_b5g5r5a1_cs));
   load_shader_code[kLoadShaderIndexR5G6B5ToB5G6R5] = std::make_pair(
       shaders::texture_load_r5g6b5_b5g6r5_cs, sizeof(shaders::texture_load_r5g6b5_b5g6r5_cs));
+  load_shader_code[kLoadShaderIndexR5G6B5ToRGBA8] = std::make_pair(
+      shaders::texture_load_r5g6b5_rgba8_cs, sizeof(shaders::texture_load_r5g6b5_rgba8_cs));
   load_shader_code[kLoadShaderIndexR5G5B6ToB5G6R5WithRBGASwizzle] =
       std::make_pair(shaders::texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs,
                      sizeof(shaders::texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs));
   load_shader_code[kLoadShaderIndexRGBA4ToARGB4] =
       std::make_pair(shaders::texture_load_r4g4b4a4_a4r4g4b4_cs,
                      sizeof(shaders::texture_load_r4g4b4a4_a4r4g4b4_cs));
+  load_shader_code[kLoadShaderIndexRGBA4ToRGBA8] = std::make_pair(
+      shaders::texture_load_r4g4b4a4_rgba8_cs, sizeof(shaders::texture_load_r4g4b4a4_rgba8_cs));
   load_shader_code[kLoadShaderIndexGBGR8ToRGB8] = std::make_pair(
       shaders::texture_load_gbgr8_rgb8_cs, sizeof(shaders::texture_load_gbgr8_rgb8_cs));
   load_shader_code[kLoadShaderIndexBGRG8ToRGB8] = std::make_pair(
@@ -3879,12 +3911,18 @@ bool VulkanTextureCache::Initialize() {
     load_shader_code_scaled[kLoadShaderIndexR5G6B5ToB5G6R5] =
         std::make_pair(shaders::texture_load_r5g6b5_b5g6r5_scaled_cs,
                        sizeof(shaders::texture_load_r5g6b5_b5g6r5_scaled_cs));
+    load_shader_code_scaled[kLoadShaderIndexR5G6B5ToRGBA8] =
+        std::make_pair(shaders::texture_load_r5g6b5_rgba8_scaled_cs,
+                       sizeof(shaders::texture_load_r5g6b5_rgba8_scaled_cs));
     load_shader_code_scaled[kLoadShaderIndexR5G5B6ToB5G6R5WithRBGASwizzle] =
         std::make_pair(shaders::texture_load_r5g5b6_b5g6r5_swizzle_rbga_scaled_cs,
                        sizeof(shaders::texture_load_r5g5b6_b5g6r5_swizzle_rbga_scaled_cs));
     load_shader_code_scaled[kLoadShaderIndexRGBA4ToARGB4] =
         std::make_pair(shaders::texture_load_r4g4b4a4_a4r4g4b4_scaled_cs,
                        sizeof(shaders::texture_load_r4g4b4a4_a4r4g4b4_scaled_cs));
+    load_shader_code_scaled[kLoadShaderIndexRGBA4ToRGBA8] =
+        std::make_pair(shaders::texture_load_r4g4b4a4_rgba8_scaled_cs,
+                       sizeof(shaders::texture_load_r4g4b4a4_rgba8_scaled_cs));
     load_shader_code_scaled[kLoadShaderIndexR10G11B11ToRGBA16] =
         std::make_pair(shaders::texture_load_r10g11b11_rgba16_scaled_cs,
                        sizeof(shaders::texture_load_r10g11b11_rgba16_scaled_cs));

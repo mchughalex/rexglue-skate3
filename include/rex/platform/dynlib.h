@@ -11,6 +11,15 @@
 
 namespace rex::platform {
 
+enum class SymbolResolution {
+  // Resolve symbols on first use. Maps to RTLD_LAZY on POSIX; the only mode on
+  // Windows.
+  kLazy,
+  // Resolve all symbols at load time. Load fails if any unresolved symbol
+  // exists. Maps to RTLD_NOW on POSIX; the only mode on Windows.
+  kImmediate,
+};
+
 class DynamicLibrary {
  public:
   DynamicLibrary() = default;
@@ -21,7 +30,10 @@ class DynamicLibrary {
   DynamicLibrary(DynamicLibrary&& other) noexcept;
   DynamicLibrary& operator=(DynamicLibrary&& other) noexcept;
 
-  bool Load(const std::filesystem::path& path);
+  bool Load(const std::filesystem::path& path, SymbolResolution mode = SymbolResolution::kLazy);
+  // Takes a reference to the library only if it is already loaded into the
+  // process (for example injected by a tool); never loads it from disk.
+  bool LoadIfAlreadyLoaded(const std::filesystem::path& path);
   void Close();
   explicit operator bool() const { return handle_ != nullptr; }
 
@@ -59,10 +71,8 @@ inline constexpr const char* kSpirvToolsSdkPath = "bin/libSPIRV-Tools-shared.so"
 #elif REX_PLATFORM_MAC
 
 inline constexpr const char* kVulkanLoader = "libvulkan.1.dylib";
-inline constexpr const char* kVulkanLoaderFallback = "libvulkan.dylib";
-inline constexpr const char* kMoltenVK = "libMoltenVK.dylib";
 inline constexpr const char* kRenderDoc = "librenderdoc.dylib";
-inline constexpr const char* kSpirvToolsSdkPath = "bin/libSPIRV-Tools-shared.dylib";
+inline constexpr const char* kSpirvToolsSdkPath = "lib/libSPIRV-Tools-shared.dylib";
 
 #else
 #error No library names provided for the target platform.

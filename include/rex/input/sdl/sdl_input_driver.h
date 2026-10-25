@@ -11,7 +11,6 @@
 
 #pragma once
 
-#include <array>
 #include <atomic>
 #include <mutex>
 #include <optional>
@@ -21,7 +20,6 @@
 
 #include <SDL3/SDL.h>
 
-#define HID_SDL_USER_COUNT 4
 #define HID_SDL_THUMB_THRES 0x4E00
 #define HID_SDL_TRIGG_THRES 0x1F
 #define HID_SDL_REPEAT_DELAY 400
@@ -36,24 +34,17 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
 
   X_STATUS Setup() override;
 
-  X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
-                           X_INPUT_CAPABILITIES* out_caps) override;
-  X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state) override;
-  X_RESULT GetStateUi(uint32_t user_index, X_INPUT_STATE* out_state) override;
-  X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) override;
-  X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
-                        X_INPUT_KEYSTROKE* out_keystroke) override;
+  void EnumerateDevices(std::vector<DeviceInfo>& out) override;
+  X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
+  X_RESULT GetDeviceStateUi(DeviceId id, X_INPUT_STATE* out_state) override;
+  X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
+                                 X_INPUT_CAPABILITIES* out_caps) override;
+  X_RESULT SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) override;
+  X_RESULT GetDeviceKeystroke(DeviceId id, uint32_t flags,
+                              X_INPUT_KEYSTROKE* out_keystroke) override;
   void OnWindowAvailable(rex::ui::Window* window) override;
 
  private:
-  struct ControllerState {
-    SDL_Gamepad* sdl;
-    X_INPUT_CAPABILITIES caps;
-    X_INPUT_STATE state;
-    bool state_changed;
-    bool is_active;
-  };
-
   enum class RepeatState {
     Idle,       // no buttons pressed or repeating has ended
     Waiting,    // a button is held and the delay is awaited
@@ -66,6 +57,17 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
     uint8_t repeat_butt_idx;
     // the last time (ms) a down (and/or repeat) event for that button was send:
     uint32_t repeat_time;
+  };
+
+  struct ControllerState {
+    SDL_Gamepad* sdl;
+    X_INPUT_CAPABILITIES caps;
+    X_INPUT_STATE state;
+    bool state_changed;
+    bool is_active;
+    DeviceId id;
+    // Per pad rather than per guest user, so it survives reassignment.
+    KeystrokeState keystroke;
   };
 
   // WindowListener
@@ -84,7 +86,8 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
 
   inline uint64_t AnalogToKeyfield(const X_INPUT_GAMEPAD& gamepad) const;
   std::optional<size_t> GetControllerIndexFromInstanceID(SDL_JoystickID instance_id);
-  ControllerState* GetControllerState(uint32_t user_index);
+  ControllerState* FindController(DeviceId id);
+  DeviceId AllocateDeviceId();
   bool TestSDLVersion() const;
   void UpdateXCapabilities(ControllerState& state);
   void QueueControllerUpdate();
@@ -94,11 +97,14 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   bool SDL_Gamepad_initialized_;
   std::atomic<int> sdl_events_unflushed_;
   std::atomic<bool> sdl_pumpevents_queued_;
-  std::array<ControllerState, HID_SDL_USER_COUNT> controllers_;
+  // Appended in connection order, never re-sorted, and unbounded: the
+  // assignment decides how many the guest sees.
+  std::vector<ControllerState> controllers_;
   std::mutex controllers_mutex_;
   std::mutex event_queue_mutex_;
   std::vector<SDL_Event> pending_events_;
-  std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
+  // Never rewound, so a handle held past a disconnect resolves to nothing.
+  uint64_t next_device_id_ = 1;
 };
 
 }  // namespace rex::input::sdl

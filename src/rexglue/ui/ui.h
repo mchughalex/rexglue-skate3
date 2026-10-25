@@ -71,13 +71,6 @@ struct KeyValueRow {
 };
 void KeyValueBlock(std::string_view header, std::span<const KeyValueRow> rows);
 
-struct PlanRow {
-  std::string_view action_label;
-  std::string path;
-  std::string reason;
-};
-void PlanTable(std::string_view header, std::span<const PlanRow> rows);
-
 struct ManualReviewRow {
   std::string location;
   std::string detail;
@@ -85,17 +78,12 @@ struct ManualReviewRow {
 };
 void ManualReviewList(std::string_view header, std::span<const ManualReviewRow> rows);
 
-[[nodiscard]] bool Confirm(std::string_view question);
-
 void DoneSummary(std::chrono::milliseconds elapsed);
 void FailureSummary(std::string_view reason, std::chrono::milliseconds elapsed);
 
 namespace detail {
 
 void SetGlobalSinkForTesting(std::unique_ptr<PresentationSink> sink);
-
-[[nodiscard]] bool ConfirmWithStream(std::string_view question, std::istream& in,
-                                     bool stdin_is_tty);
 
 bool SinkIsTty();
 

@@ -26,6 +26,17 @@ namespace rex {
  */
 using RegisterModulesFunc = void (*)(system::KernelState*);
 
+struct PPCCodegenFlags {
+  bool skip_lr = false;
+  bool ctr_as_local = false;
+  bool xer_as_local = false;
+  bool reserved_as_local = false;
+  bool skip_msr = false;
+  bool cr_as_local = false;
+  bool non_argument_as_local = false;
+  bool non_volatile_as_local = false;
+};
+
 /// PPC image layout passed from the generated config header into ReXApp.
 struct PPCImageInfo {
   u32 code_base;
@@ -35,6 +46,7 @@ struct PPCImageInfo {
   const PPCFuncMapping* func_mappings;
   bool rexcrt_heap = false;  ///< Set by codegen when [rexcrt] has heap functions
   RegisterModulesFunc register_modules = nullptr;  ///< Set by codegen for multi-binary projects
+  PPCCodegenFlags codegen_flags{};                 ///< Set by codegen from the config flags
 };
 
 }  // namespace rex

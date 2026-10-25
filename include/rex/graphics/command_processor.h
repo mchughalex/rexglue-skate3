@@ -24,7 +24,6 @@
 
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/registers.h>
-#include <rex/graphics/trace_writer.h>
 #include <rex/graphics/xenos.h>
 #include <rex/memory.h>
 #include <rex/memory/ring_buffer.h>
@@ -117,19 +116,6 @@ class CommandProcessor {
   // awaited.
   virtual void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                        bool blocking);
-
-  virtual void RequestFrameTrace(const std::filesystem::path& root_path);
-  virtual void BeginTracing(const std::filesystem::path& root_path);
-  virtual void EndTracing();
-
-  virtual void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) = 0;
-
-  void RestoreRegisters(uint32_t first_register, const uint32_t* register_values,
-                        uint32_t register_count, bool execute_callbacks);
-  void RestoreGammaRamp(const reg::DC_LUT_30_COLOR* new_gamma_ramp_256_entry_table,
-                        const reg::DC_LUT_PWL_DATA* new_gamma_ramp_pwl_rgb,
-                        uint32_t new_gamma_ramp_rw_component);
-  virtual void RestoreEdramSnapshot(const void* snapshot) = 0;
 
   void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2);
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2);
@@ -241,8 +227,6 @@ class CommandProcessor {
   // implementations.
   SwapPostEffect GetActualSwapPostEffect() const { return swap_post_effect_actual_; }
 
-  virtual void InitializeTrace();
-
   // Shared readback resolve mode with backend legacy-flag alias support.
   ReadbackResolveMode GetReadbackResolveMode(bool legacy_readback_resolve_enabled) const;
   // Shared memexport readback enable state with backend legacy-flag override support.
@@ -252,16 +236,6 @@ class CommandProcessor {
   system::KernelState* kernel_state_ = nullptr;
   GraphicsSystem* graphics_system_ = nullptr;
   RegisterFile* register_file_ = nullptr;
-
-  TraceWriter trace_writer_;
-  enum class TraceState {
-    kDisabled,
-    kStreaming,
-    kSingleFrame,
-  };
-  TraceState trace_state_ = TraceState::kDisabled;
-  std::filesystem::path trace_stream_path_;
-  std::filesystem::path trace_frame_path_;
 
   std::atomic<bool> worker_running_;
   system::object_ref<system::XHostThread> worker_thread_;

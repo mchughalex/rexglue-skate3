@@ -19,7 +19,6 @@
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/registers.h>
-#include <rex/graphics/trace_writer.h>
 #include <rex/graphics/xenos.h>
 #include <rex/memory.h>
 
@@ -616,8 +615,8 @@ struct ResolveInfo {
 // emulated as snorm, with range limited to -1...1, but with correct blending
 // within that range.
 bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
-                    TraceWriter& trace_writer, uint32_t draw_resolution_scale_x,
-                    uint32_t draw_resolution_scale_y, bool fixed_rg16_truncated_to_minus_1_to_1,
+                    uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
+                    bool fixed_rg16_truncated_to_minus_1_to_1,
                     bool fixed_rgba16_truncated_to_minus_1_to_1, ResolveInfo& info_out);
 
 }  // namespace rex::graphics::draw_util

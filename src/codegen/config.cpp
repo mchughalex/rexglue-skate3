@@ -100,12 +100,6 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
   if (auto v = toml["template_dir"].value<std::string>()) {
     MergeScalar(cfg.templateDir, *v, "template_dir");
   }
-  if (auto v = toml["patch_file_path"].value<std::string>()) {
-    MergeScalar(cfg.patchFilePath, *v, "patch_file_path");
-  }
-  if (auto v = toml["patched_file_path"].value<std::string>()) {
-    MergeScalar(cfg.patchedFilePath, *v, "patched_file_path");
-  }
 
   // Bool scalars
   auto hasBool = [&](const char* key) -> bool { return toml[key].is_boolean(); };
@@ -206,6 +200,7 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
       fcfg.end = (*table)["end"].value_or(0u);
       fcfg.name = (*table)["name"].value_or(std::string{});
       fcfg.parent = (*table)["parent"].value_or(0u);
+      fcfg.shareRegisters = (*table)["share_registers"].value_or(false);
 
       if (fcfg.size && fcfg.end) {
         REXCODEGEN_ERROR("Function 0x{:08X}: cannot specify both 'size' and 'end'", address);
@@ -415,6 +410,7 @@ bool LoadRecursive(const std::filesystem::path& filePath, RecompilerConfig& cfg,
     return false;
   }
   visited.insert(canonicalStr);
+  cfg.loadedFiles.push_back(canonicalStr);
 
   toml::table toml;
   try {

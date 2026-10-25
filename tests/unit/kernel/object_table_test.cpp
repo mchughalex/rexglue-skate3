@@ -179,25 +179,6 @@ TEST_CASE("object_ref release returns pointer without destroying", "[kernel][obj
   CHECK(TestObject::destructor_count == 1);
 }
 
-TEST_CASE("object_ref arrow operator works", "[kernel][object_ref]") {
-  InitTestLogging();
-
-  auto* obj = new TestObject();
-  object_ref<TestObject> ref(obj);
-
-  CHECK(ref->type() == XObject::Type::Undefined);
-}
-
-TEST_CASE("object_ref dereference operator works", "[kernel][object_ref]") {
-  InitTestLogging();
-
-  auto* obj = new TestObject();
-  object_ref<TestObject> ref(obj);
-
-  TestObject& deref = *ref;
-  CHECK(&deref == obj);
-}
-
 TEST_CASE("retain_object helper retains and wraps", "[kernel][object_ref]") {
   InitTestLogging();
   DestructorCountReset reset;

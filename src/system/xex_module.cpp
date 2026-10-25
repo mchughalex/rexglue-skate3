@@ -313,9 +313,9 @@ int XexModule::ApplyPatch(XexModule* module) {
   // If headers_source_offset is set, copy [source_offset:source_size] to
   // target_offset
   if (patch_header->delta_headers_source_offset) {
-    memcpy(header_ptr + patch_header->delta_headers_target_offset,
-           header_ptr + patch_header->delta_headers_source_offset,
-           patch_header->delta_headers_source_size);
+    memmove(header_ptr + patch_header->delta_headers_target_offset,
+            header_ptr + patch_header->delta_headers_source_offset,
+            patch_header->delta_headers_source_size);
   }
 
   // If new size is smaller than original, null out the difference
@@ -424,9 +424,9 @@ int XexModule::ApplyPatch(XexModule* module) {
   // If image_source_offset is set, copy [source_offset:source_size] to
   // target_offset
   if (patch_header->delta_image_source_offset) {
-    memcpy(base_exe + patch_header->delta_image_target_offset,
-           base_exe + patch_header->delta_image_source_offset,
-           patch_header->delta_image_source_size);
+    memmove(base_exe + patch_header->delta_image_target_offset,
+            base_exe + patch_header->delta_image_source_offset,
+            patch_header->delta_image_source_size);
   }
 
   // TODO: should we use new_image_size here instead?
@@ -835,6 +835,8 @@ int XexModule::ReadPEHeaders() {
   if (opthdr->Subsystem != IMAGE_SUBSYSTEM_XBOX) {
     return 1;
   }
+
+  pe_time_date_stamp_ = filehdr->TimeDateStamp;
 
 // Linker version - likely 8+
 // Could be useful for recognizing certain patterns

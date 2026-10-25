@@ -21,15 +21,9 @@
 
 #include <rex/ui/immediate_drawer.h>
 #include <rex/ui/presenter.h>
+#include <rex/ui/style.h>
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
-
-struct ImDrawData;
-struct ImFont;
-struct ImFontAtlas;
-struct ImGuiContext;
-struct ImGuiIO;
-enum ImGuiKey : int;
 
 namespace rex {
 namespace ui {
@@ -40,7 +34,9 @@ class Window;
 class ImGuiDrawer : public WindowInputListener, public UIDrawer {
  public:
   using FontSetupCallback = std::function<void(ImFontAtlas*)>;
-  ImGuiDrawer(Window* window, size_t z_order, FontSetupCallback font_setup = nullptr);
+  using StyleSetupCallback = std::function<void(ImGuiStyle&, Style&)>;
+  ImGuiDrawer(Window* window, size_t z_order, FontSetupCallback font_setup = nullptr,
+              StyleSetupCallback style_setup = nullptr);
   ~ImGuiDrawer();
 
   ImGuiIO& GetIO();
@@ -58,11 +54,17 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   ImFont* ui_font_on_light() const { return ui_font_on_light_; }
   ImFont* ui_font_semibold_on_light() const { return ui_font_semibold_on_light_; }
 
+  // Per-overlay styling, patched by the consumer in OnConfigureStyle.
+  Style& style() { return style_; }
+  const Style& style() const { return style_; }
+
   void AddDialog(ImGuiDialog* dialog);
   void RemoveDialog(ImGuiDialog* dialog);
 
   Presenter* presenter() const { return presenter_; }
 
+  // Whether Draw would render anything, so a caller that has to marshal to the
+  // UI thread can skip the round trip entirely.
   // SetPresenter may be called from the destructor.
   void SetPresenter(Presenter* new_presenter);
   void SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer);
@@ -115,6 +117,8 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   Window* window_;
   size_t z_order_;
   FontSetupCallback font_setup_;
+  StyleSetupCallback style_setup_;
+  Style style_;
 
   ImGuiContext* internal_state_ = nullptr;
 
@@ -148,10 +152,6 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   // queued via the ImGui event API and only reflected at NewFrame).
   uint32_t mouse_buttons_down_ = 0;
 
-  // Whether the platform window has been asked to activate text input
-  // (character event delivery / IME) because a text widget is active.
-  bool text_input_active_ = false;
-
   // If there's an active pointer, the ImGui mouse is controlled by this touch.
   // If it's TouchEvent::kPointerIDNone, the ImGui mouse is controlled by the
   // mouse.
@@ -164,6 +164,15 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
 
   double frame_time_tick_frequency_;
   uint64_t last_frame_time_ticks_;
+
+  // ImGui's IME hook, called from EndFrame with the frame being ended.
+  // ImGuiIO::WantTextInput would be a frame behind.
+  static void PlatformSetImeData(ImGuiContext* context, ImGuiViewport* viewport,
+                                 ImGuiPlatformImeData* data);
+  void SetWindowTextInputActive(bool active);
+
+  // Last value handed to the window, so detaching can clear it without a frame.
+  bool text_input_active_ = false;
 };
 
 }  // namespace ui

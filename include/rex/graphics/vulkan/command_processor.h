@@ -140,10 +140,6 @@ class VulkanCommandProcessor : public CommandProcessor {
   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                bool blocking) override;
 
-  void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) override;
-
-  void RestoreEdramSnapshot(const void* snapshot) override;
-
   ui::vulkan::VulkanDevice* GetVulkanDevice() const {
     return static_cast<const ui::vulkan::VulkanProvider*>(graphics_system_->provider())
         ->vulkan_device();
@@ -278,8 +274,6 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                  IndexBufferInfo* index_buffer_info, bool major_mode_explicit) override;
   bool IssueCopy() override;
-
-  void InitializeTrace() override;
 
  private:
   friend class VulkanTextureCache;

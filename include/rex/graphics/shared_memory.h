@@ -10,7 +10,6 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
-#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <utility>
@@ -145,20 +144,6 @@ class SharedMemory {
   virtual bool UploadRanges(
       const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) = 0;
 
-  const std::vector<std::pair<uint32_t, uint32_t>>& trace_download_ranges() {
-    return trace_download_ranges_;
-  }
-  uint32_t trace_download_page_count() const { return trace_download_page_count_; }
-  // Fills trace_download_ranges() and trace_download_page_count() with
-  // GPU-written ranges that need to be downloaded, and also invalidates
-  // non-GPU-written ranges so only the needed data - not the all the collected
-  // data - will be written in the trace. trace_download_page_count() will be 0
-  // if nothing to download.
-  void PrepareForTraceDownload();
-  // Release memory used for trace download ranges, to be called after
-  // downloading or in cases when download is dropped.
-  void ReleaseTraceDownloadRanges();
-
  private:
   memory::Memory& memory_;
 
@@ -180,10 +165,6 @@ class SharedMemory {
   // persistently allocated vector).
   std::vector<std::pair<uint32_t, uint32_t>> upload_ranges_;
 
-  // GPU-written memory downloading for traces. <Start address, length>.
-  std::vector<std::pair<uint32_t, uint32_t>> trace_download_ranges_;
-  uint32_t trace_download_page_count_ = 0;
-
   // Mutex between the guest memory subsystem and the command processor, to be
   // locked when checking or updating validity of pages/ranges and when firing
   // watches.
@@ -193,16 +174,10 @@ class SharedMemory {
   // Things below should be fully protected by global_critical_region.
   // ***************************************************************************
 
-  // Double-buffered valid-page flags for lockless checks in RequestRanges.
-  std::vector<uint64_t> valid_buffer_a_;
-  std::vector<uint64_t> valid_buffer_b_;
-  std::atomic<uint64_t*> active_valid_flags_{nullptr};
-  std::atomic<uint64_t*> staging_valid_flags_{nullptr};
+  // Pages whose contents in the buffer are in sync with guest memory.
+  std::vector<uint64_t> system_page_flags_valid_;
   // Subset of valid pages containing data written by the GPU.
   std::vector<uint64_t> system_page_flags_valid_and_gpu_written_;
-  // Dirty state tracking for frame-end page-state refresh.
-  std::atomic<bool> gpu_written_data_dirty_{false};
-  std::atomic<uint32_t> dirty_blocks_{0};
   uint32_t num_system_page_flags_ = 0;
 
   static std::pair<uint32_t, uint32_t> MemoryInvalidationCallbackThunk(

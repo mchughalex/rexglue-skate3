@@ -41,13 +41,72 @@ const char kProggyTinyCompressedDataBase85[10950 + 1] =
 
 static_assert(sizeof(ImmediateVertex) == sizeof(ImDrawVert), "Vertex types must match");
 
-ImGuiDrawer::ImGuiDrawer(rex::ui::Window* window, size_t z_order, FontSetupCallback font_setup)
-    : window_(window), z_order_(z_order), font_setup_(std::move(font_setup)) {
+namespace {
+
+void ApplyDefaultStyle(ImGuiStyle& style) {
+  style.ScrollbarRounding = 0;
+  style.WindowRounding = 0;
+  style.TabRounding = 0;
+  style.Colors[ImGuiCol_Text] = ImVec4(0.89f, 0.90f, 0.90f, 1.00f);
+  style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
+  style.Colors[ImGuiCol_WindowBg] = ImVec4(0.00f, 0.06f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_ChildBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+  style.Colors[ImGuiCol_Border] = ImVec4(0.00f, 0.35f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+  style.Colors[ImGuiCol_FrameBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.30f);
+  style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.90f, 0.80f, 0.80f, 0.40f);
+  style.Colors[ImGuiCol_FrameBgActive] = ImVec4(0.90f, 0.65f, 0.65f, 0.45f);
+  style.Colors[ImGuiCol_TitleBg] = ImVec4(0.00f, 0.40f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.00f, 0.33f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.16f, 0.65f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_MenuBarBg] = ImVec4(0.00f, 0.35f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_ScrollbarBg] = ImVec4(0.00f, 0.40f, 0.11f, 0.59f);
+  style.Colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.00f, 0.68f, 0.00f, 0.68f);
+  style.Colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.00f, 1.00f, 0.15f, 0.62f);
+  style.Colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.00f, 0.91f, 0.09f, 0.40f);
+  style.Colors[ImGuiCol_PopupBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.99f);
+  style.Colors[ImGuiCol_CheckMark] = ImVec4(0.74f, 0.90f, 0.72f, 0.50f);
+  style.Colors[ImGuiCol_SliderGrab] = ImVec4(1.00f, 1.00f, 1.00f, 0.30f);
+  style.Colors[ImGuiCol_SliderGrabActive] = ImVec4(0.34f, 0.75f, 0.11f, 1.00f);
+  style.Colors[ImGuiCol_Button] = ImVec4(0.15f, 0.56f, 0.11f, 0.60f);
+  style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.19f, 0.72f, 0.09f, 1.00f);
+  style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.19f, 0.60f, 0.09f, 1.00f);
+  style.Colors[ImGuiCol_Header] = ImVec4(0.00f, 0.40f, 0.00f, 0.71f);
+  style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.00f, 0.60f, 0.26f, 0.80f);
+  style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.00f, 0.75f, 0.00f, 0.80f);
+  style.Colors[ImGuiCol_Separator] = ImVec4(0.00f, 0.35f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_SeparatorHovered] = ImVec4(0.36f, 0.89f, 0.38f, 1.00f);
+  style.Colors[ImGuiCol_SeparatorActive] = ImVec4(0.13f, 0.50f, 0.11f, 1.00f);
+  style.Colors[ImGuiCol_ResizeGrip] = ImVec4(1.00f, 1.00f, 1.00f, 0.30f);
+  style.Colors[ImGuiCol_ResizeGripHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.60f);
+  style.Colors[ImGuiCol_ResizeGripActive] = ImVec4(1.00f, 1.00f, 1.00f, 0.90f);
+  style.Colors[ImGuiCol_Tab] = style.Colors[ImGuiCol_Button];
+  style.Colors[ImGuiCol_TabHovered] = style.Colors[ImGuiCol_ButtonHovered];
+  style.Colors[ImGuiCol_TabActive] = style.Colors[ImGuiCol_ButtonActive];
+  style.Colors[ImGuiCol_TabUnfocused] = style.Colors[ImGuiCol_FrameBg];
+  style.Colors[ImGuiCol_TabUnfocusedActive] = style.Colors[ImGuiCol_FrameBgHovered];
+  style.Colors[ImGuiCol_PlotLines] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
+  style.Colors[ImGuiCol_PlotLinesHovered] = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_PlotHistogram] = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_PlotHistogramHovered] = ImVec4(1.00f, 0.60f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_TextSelectedBg] = ImVec4(0.00f, 1.00f, 0.00f, 0.21f);
+  style.Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.35f);
+}
+
+}  // namespace
+
+ImGuiDrawer::ImGuiDrawer(rex::ui::Window* window, size_t z_order, FontSetupCallback font_setup,
+                         StyleSetupCallback style_setup)
+    : window_(window),
+      z_order_(z_order),
+      font_setup_(std::move(font_setup)),
+      style_setup_(std::move(style_setup)) {
   Initialize();
 }
 
 ImGuiDrawer::~ImGuiDrawer() {
   SetPresenter(nullptr);
+  SetWindowTextInputActive(false);
   if (!dialogs_.empty()) {
     window_->RemoveInputListener(this);
     if (touch_pointer_id_ == TouchEvent::kPointerIDNone && mouse_buttons_down_) {
@@ -130,6 +189,10 @@ void ImGuiDrawer::Initialize() {
 
   auto& io = ImGui::GetIO();
 
+  auto& platform_io = ImGui::GetPlatformIO();
+  platform_io.Platform_SetImeDataFn = PlatformSetImeData;
+  platform_io.Platform_ImeUserData = this;
+
   // TODO(gibbed): disable imgui.ini saving for now,
   // imgui assumes paths are char* so we can't throw a good path at it on
   // Windows.
@@ -147,53 +210,10 @@ void ImGuiDrawer::Initialize() {
   io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
 
   auto& style = ImGui::GetStyle();
-  style.ScrollbarRounding = 0;
-  style.WindowRounding = 0;
-  style.TabRounding = 0;
-  style.Colors[ImGuiCol_Text] = ImVec4(0.89f, 0.90f, 0.90f, 1.00f);
-  style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
-  style.Colors[ImGuiCol_WindowBg] = ImVec4(0.00f, 0.06f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_ChildBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-  style.Colors[ImGuiCol_Border] = ImVec4(0.00f, 0.35f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-  style.Colors[ImGuiCol_FrameBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.30f);
-  style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.90f, 0.80f, 0.80f, 0.40f);
-  style.Colors[ImGuiCol_FrameBgActive] = ImVec4(0.90f, 0.65f, 0.65f, 0.45f);
-  style.Colors[ImGuiCol_TitleBg] = ImVec4(0.00f, 0.40f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.00f, 0.33f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.16f, 0.65f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_MenuBarBg] = ImVec4(0.00f, 0.35f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_ScrollbarBg] = ImVec4(0.00f, 0.40f, 0.11f, 0.59f);
-  style.Colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.00f, 0.68f, 0.00f, 0.68f);
-  style.Colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.00f, 1.00f, 0.15f, 0.62f);
-  style.Colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.00f, 0.91f, 0.09f, 0.40f);
-  style.Colors[ImGuiCol_PopupBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.99f);
-  style.Colors[ImGuiCol_CheckMark] = ImVec4(0.74f, 0.90f, 0.72f, 0.50f);
-  style.Colors[ImGuiCol_SliderGrab] = ImVec4(1.00f, 1.00f, 1.00f, 0.30f);
-  style.Colors[ImGuiCol_SliderGrabActive] = ImVec4(0.34f, 0.75f, 0.11f, 1.00f);
-  style.Colors[ImGuiCol_Button] = ImVec4(0.15f, 0.56f, 0.11f, 0.60f);
-  style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.19f, 0.72f, 0.09f, 1.00f);
-  style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.19f, 0.60f, 0.09f, 1.00f);
-  style.Colors[ImGuiCol_Header] = ImVec4(0.00f, 0.40f, 0.00f, 0.71f);
-  style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.00f, 0.60f, 0.26f, 0.80f);
-  style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.00f, 0.75f, 0.00f, 0.80f);
-  style.Colors[ImGuiCol_Separator] = ImVec4(0.00f, 0.35f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_SeparatorHovered] = ImVec4(0.36f, 0.89f, 0.38f, 1.00f);
-  style.Colors[ImGuiCol_SeparatorActive] = ImVec4(0.13f, 0.50f, 0.11f, 1.00f);
-  style.Colors[ImGuiCol_ResizeGrip] = ImVec4(1.00f, 1.00f, 1.00f, 0.30f);
-  style.Colors[ImGuiCol_ResizeGripHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.60f);
-  style.Colors[ImGuiCol_ResizeGripActive] = ImVec4(1.00f, 1.00f, 1.00f, 0.90f);
-  style.Colors[ImGuiCol_Tab] = style.Colors[ImGuiCol_Button];
-  style.Colors[ImGuiCol_TabHovered] = style.Colors[ImGuiCol_ButtonHovered];
-  style.Colors[ImGuiCol_TabActive] = style.Colors[ImGuiCol_ButtonActive];
-  style.Colors[ImGuiCol_TabUnfocused] = style.Colors[ImGuiCol_FrameBg];
-  style.Colors[ImGuiCol_TabUnfocusedActive] = style.Colors[ImGuiCol_FrameBgHovered];
-  style.Colors[ImGuiCol_PlotLines] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-  style.Colors[ImGuiCol_PlotLinesHovered] = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_PlotHistogram] = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_PlotHistogramHovered] = ImVec4(1.00f, 0.60f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_TextSelectedBg] = ImVec4(0.00f, 1.00f, 0.00f, 0.21f);
-  style.Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.35f);
+  ApplyDefaultStyle(style);
+  if (style_setup_) {
+    style_setup_(style, style_);
+  }
 
   frame_time_tick_frequency_ = double(rex::chrono::Clock::QueryHostTickFrequency());
   last_frame_time_ticks_ = rex::chrono::Clock::QueryHostTickCount();
@@ -387,7 +407,8 @@ void ImGuiDrawer::SetupFonts() {
     // DirectWrite white-on-black edge
     // profiles (identity was measurably thinner/dimmer). The *_on_light_
     // variants below keep gamma 1.0 - dark-on-light needs no correction.
-    config.RasterizerGamma = 0.62f;
+    // Skate2Port: stock imgui has no RasterizerGamma (fork-only field).
+    // config.RasterizerGamma = 0.62f;
     config.FontLoaderFlags = ImGuiFreeTypeBuilderFlags_NoHinting;
     ui_font_ = io.Fonts->AddFontFromMemoryCompressedBase85TTF(
         GetInterRegularCompressedBase85(), 18.0f, &config);
@@ -408,7 +429,8 @@ void ImGuiDrawer::SetupFonts() {
     config_on_light.RasterizerMultiply = 1.0f;
     // Dark-on-light matches the browser with NO coverage curve (harness fit:
     // identity beat every contrast/gamma variant once bake==draw size).
-    config_on_light.RasterizerGamma = 1.0f;
+    // Skate2Port: stock imgui has no RasterizerGamma (fork-only field).
+    // config_on_light.RasterizerGamma = 1.0f;
     ui_font_on_light_ = io.Fonts->AddFontFromMemoryCompressedBase85TTF(
         GetInterRegularCompressedBase85(), 18.0f, &config_on_light);
     ui_font_semibold_on_light_ = io.Fonts->AddFontFromMemoryCompressedBase85TTF(
@@ -528,7 +550,6 @@ void ImGuiDrawer::SetPresenter(Presenter* new_presenter) {
     if (!dialogs_.empty()) {
       presenter_->RemoveUIDrawerFromUIThread(this);
     }
-    ImGuiIO& io = GetIO();
   }
   presenter_ = new_presenter;
   if (presenter_) {
@@ -559,19 +580,28 @@ void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
     }
   }
   immediate_drawer_ = new_immediate_drawer;
-  if (immediate_drawer_) {
+  // Eagerly upload the font atlas only when a presenter is attached (SDK mode).
+  // In detached mode (presenter_ == nullptr) the app's renderer device may not
+  // exist yet at SetupPresentation, so defer to the idempotent Draw-time
+  // SetupFontTexture().
+  if (immediate_drawer_ && presenter_) {
     SetupFontTexture();
   }
 }
 
 void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
-  // Drawing of anything is initiated by the presenter.
-  assert_not_null(presenter_);
+  // Drawing is initiated by the presenter (SDK mode), or by the app in detached
+  // mode (config.graphics == nullptr), where there is no presenter.
   if (!immediate_drawer_) {
-    // A presenter has been attached, but an immediate drawer hasn't been
-    // attached yet.
+    // A drawer target has been attached, but an immediate drawer hasn't yet.
     return;
   }
+
+  // In detached mode the app's immediate drawer (and the renderer device
+  // backing it) may only become usable on the first frame, after the guest
+  // creates its D3D device. Upload the font atlas lazily and idempotently;
+  // SetupFontTexture early-returns once font_texture_ is set.
+  SetupFontTexture();
 
   if (dialogs_.empty()) {
     return;
@@ -644,8 +674,11 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
 
   if (std::any_of(dialogs_.cbegin(), dialogs_.cend(),
                   [](const ImGuiDialog* dialog) { return dialog->WantsContinuousRepaint(); })) {
-    // Repaint (and handle input) continuously if still active.
-    presenter_->RequestUIPaintFromUIThread();
+    // Repaint (and handle input) continuously if still active. In detached mode
+    // there is no presenter; the app drives repaint via its own present loop.
+    if (presenter_) {
+      presenter_->RequestUIPaintFromUIThread();
+    }
   }
 }
 
@@ -700,7 +733,9 @@ void ImGuiDrawer::RenderDrawLists(ImDrawData* data, UIDrawContext& ui_draw_conte
 
   immediate_drawer_->Begin(ui_draw_context, io.DisplaySize.x, io.DisplaySize.y);
 
-  for (int i = 0; i < data->CmdListsCount; ++i) {
+  // Skate2Port: newer imgui no longer fills the obsolete CmdListsCount, which
+  // left every overlay (on-screen keyboard, FPS counter, menus) undrawn.
+  for (int i = 0; i < data->CmdLists.Size; ++i) {
     const auto cmd_list = data->CmdLists[i];
 
     ImmediateDrawBatch batch;
@@ -934,6 +969,26 @@ void ImGuiDrawer::SwitchToPhysicalMouseAndUpdateMousePosition(const MouseEvent& 
   UpdateMousePosition(float(e.x()), float(e.y()));
 }
 
+void ImGuiDrawer::PlatformSetImeData(ImGuiContext* context, ImGuiViewport* viewport,
+                                     ImGuiPlatformImeData* data) {
+  (void)context;
+  (void)viewport;
+  auto* drawer = static_cast<ImGuiDrawer*>(ImGui::GetPlatformIO().Platform_ImeUserData);
+  if (drawer) {
+    drawer->SetWindowTextInputActive(data->WantTextInput);
+  }
+}
+
+void ImGuiDrawer::SetWindowTextInputActive(bool active) {
+  if (text_input_active_ == active) {
+    return;
+  }
+  text_input_active_ = active;
+  // SDL text input is main thread only, and in detached mode Draw is not.
+  Window* window = window_;
+  window->app_context().CallInUIThread([window, active] { window->SetTextInputActive(active); });
+}
+
 void ImGuiDrawer::DetachIfLastDialogRemoved() {
   // IsDrawingDialogs() is also checked because in a situation of removing the
   // only dialog, then adding a dialog, from within a dialog's Draw function,
@@ -942,6 +997,9 @@ void ImGuiDrawer::DetachIfLastDialogRemoved() {
   if (!dialogs_.empty() || IsDrawingDialogs()) {
     return;
   }
+  // Detaching stops Draw, so there is no later frame to notice that the
+  // removed dialog took a focused InputText with it.
+  SetWindowTextInputActive(false);
   if (presenter_) {
     presenter_->RemoveUIDrawerFromUIThread(this);
   }

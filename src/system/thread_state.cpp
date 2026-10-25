@@ -10,7 +10,6 @@
  */
 
 #include <cstdlib>
-#include <cstring>
 
 #include <rex/assert.h>
 #include <rex/kernel.h>
@@ -31,9 +30,6 @@ ThreadState::ThreadState(uint32_t thread_id, uint32_t stack_base, uint32_t pcr_a
     uint32_t system_thread_handle = rex::thread::current_thread_system_id();
     thread_id_ = 0x80000000 | system_thread_handle;
   }
-
-  // Initialize the PPCContext (context_ already points to context_storage_)
-  std::memset(context_, 0, sizeof(::PPCContext));
 
   // Set initial registers
   context_->r1.u64 = stack_base;    // Stack pointer

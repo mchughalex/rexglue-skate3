@@ -16,21 +16,16 @@
 #include <rex/graphics/pipeline/shader/interpreter.h>
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/register_file.h>
-#include <rex/graphics/trace_writer.h>
 #include <rex/memory.h>
 
 namespace rex::graphics {
 
 class DrawExtentEstimator {
  public:
-  DrawExtentEstimator(const RegisterFile& register_file, const memory::Memory& memory,
-                      TraceWriter* trace_writer)
+  DrawExtentEstimator(const RegisterFile& register_file, const memory::Memory& memory)
       : register_file_(register_file),
         memory_(memory),
-        trace_writer_(trace_writer),
-        shader_interpreter_(register_file, memory) {
-    shader_interpreter_.SetTraceWriter(trace_writer);
-  }
+        shader_interpreter_(register_file, memory) {}
 
   // The shader must have its ucode analyzed.
   uint32_t EstimateVertexMaxY(const Shader& vertex_shader);
@@ -63,7 +58,6 @@ class DrawExtentEstimator {
 
   const RegisterFile& register_file_;
   const memory::Memory& memory_;
-  TraceWriter* trace_writer_;
 
   ShaderInterpreter shader_interpreter_;
 };

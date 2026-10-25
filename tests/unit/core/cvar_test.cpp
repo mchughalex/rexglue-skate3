@@ -6,6 +6,7 @@
  * @license     BSD 3-Clause License
  */
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -26,6 +27,15 @@ REXCVAR_DEFINE_STRING(test_init_only_flag, "initial", "Test", "Init-only flag")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(test_restart_flag, false, "Test", "Requires restart")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+// Command dispatch test fixtures.
+static int g_noarg_cmd_calls = 0;
+static std::string g_args_cmd_received;
+REXCVAR_DEFINE_COMMAND(
+    test_noarg_cmd, []() { ++g_noarg_cmd_calls; }, "Test", "No-arg test command");
+REXCVAR_DEFINE_COMMAND_ARGS(
+    test_args_cmd, [](std::string_view a) { g_args_cmd_received = std::string(a); }, "Test",
+    "Arg test command");
 
 TEST_CASE("cvar registry stores flag metadata", "[cvar]") {
   auto flags = rex::cvar::ListFlags();
@@ -152,6 +162,8 @@ TEST_CASE("cvar GetFlagInfo returns metadata", "[cvar]") {
 }
 
 TEST_CASE("cvar TOML config loading", "[cvar]") {
+  rex::cvar::testing::ResetAllForTesting();
+
   auto temp_dir = std::filesystem::temp_directory_path();
   auto config_path = temp_dir / "test_config.toml";
 
@@ -180,6 +192,181 @@ TEST_CASE("cvar TOML config loading", "[cvar]") {
     auto missing = temp_dir / "nonexistent.toml";
     rex::cvar::LoadConfig(missing);
   }
+}
+
+TEST_CASE("cvar config replays values for flags registered after loading", "[cvar]") {
+  rex::cvar::testing::ResetAllForTesting();
+
+  auto config_path = std::filesystem::temp_directory_path() / "test_deferred_cvar.toml";
+  {
+    std::ofstream file(config_path);
+    file << "test_deferred_flag = \"F10\"\n";
+  }
+
+  rex::cvar::LoadConfig(config_path);
+  char argv0[] = "cvar_test";
+  char* argv[] = {argv0};
+  rex::cvar::Init(1, argv);
+  std::string value = "F7";
+  {
+    rex::cvar::FlagRegistrar registrar({
+        .name = "test_deferred_flag",
+        .type = rex::cvar::FlagType::String,
+        .category = "Test",
+        .description = "Late registered test flag",
+        .setter =
+            [&value](std::string_view new_value) {
+              value = new_value;
+              return true;
+            },
+        .getter = [&value]() { return value; },
+        .default_value = "F7",
+    });
+
+    CHECK(value == "F10");
+  }
+
+  std::filesystem::remove(config_path);
+  rex::cvar::testing::ResetAllForTesting();
+}
+
+namespace {
+
+void SetTestEnv(const char* name, const char* value) {
+#ifdef _WIN32
+  _putenv_s(name, value);
+#else
+  if (*value == '\0') {
+    unsetenv(name);
+  } else {
+    setenv(name, value, 1);
+  }
+#endif
+}
+
+}  // namespace
+
+TEST_CASE("cvar source precedence", "[cvar]") {
+  rex::cvar::testing::ResetAllForTesting();
+
+  auto config_path = std::filesystem::temp_directory_path() / "test_precedence.toml";
+  {
+    std::ofstream file(config_path);
+    file << "test_string_flag = \"from config\"\n";
+    file << "test_int32_flag = 111\n";
+  }
+
+  SECTION("Command line beats the config file regardless of load order") {
+    char argv0[] = "cvar_test";
+    char arg1[] = "--test_string_flag=from cmdline";
+    char* argv[] = {argv0, arg1};
+    rex::cvar::Init(2, argv);
+
+    rex::cvar::LoadConfig(config_path);
+
+    CHECK(REXCVAR_GET(test_string_flag) == "from cmdline");
+    CHECK(rex::cvar::GetFlagSource("test_string_flag") == rex::cvar::Source::kCommandLine);
+
+    // A flag the command line did not mention still takes the config value
+    CHECK(REXCVAR_GET(test_int32_flag) == 111);
+    CHECK(rex::cvar::GetFlagSource("test_int32_flag") == rex::cvar::Source::kConfig);
+  }
+
+  SECTION("Command line beats the environment") {
+    SetTestEnv("REX_TEST_INT32_FLAG", "222");
+
+    char argv0[] = "cvar_test";
+    char arg1[] = "--test_int32_flag=333";
+    char* argv[] = {argv0, arg1};
+    rex::cvar::Init(2, argv);
+    rex::cvar::ApplyEnvironment();
+
+    CHECK(REXCVAR_GET(test_int32_flag) == 333);
+    CHECK(rex::cvar::GetFlagSource("test_int32_flag") == rex::cvar::Source::kCommandLine);
+
+    SetTestEnv("REX_TEST_INT32_FLAG", "");
+  }
+
+  SECTION("Environment beats the config file") {
+    SetTestEnv("REX_TEST_INT32_FLAG", "222");
+
+    rex::cvar::ApplyEnvironment();
+    rex::cvar::LoadConfig(config_path);
+
+    CHECK(REXCVAR_GET(test_int32_flag) == 222);
+    CHECK(rex::cvar::GetFlagSource("test_int32_flag") == rex::cvar::Source::kEnvironment);
+
+    SetTestEnv("REX_TEST_INT32_FLAG", "");
+  }
+
+  SECTION("Runtime writes beat every startup source") {
+    char argv0[] = "cvar_test";
+    char arg1[] = "--test_string_flag=from cmdline";
+    char* argv[] = {argv0, arg1};
+    rex::cvar::Init(2, argv);
+
+    REQUIRE(rex::cvar::SetFlagByName("test_string_flag", "from console"));
+    CHECK(REXCVAR_GET(test_string_flag) == "from console");
+    CHECK(rex::cvar::GetFlagSource("test_string_flag") == rex::cvar::Source::kRuntime);
+  }
+
+  SECTION("Boolean negation from the command line beats the config file") {
+    {
+      std::ofstream file(config_path);
+      file << "test_bool_flag = true\n";
+    }
+
+    char argv0[] = "cvar_test";
+    char arg1[] = "--no-test_bool_flag";
+    char* argv[] = {argv0, arg1};
+    rex::cvar::Init(2, argv);
+
+    rex::cvar::LoadConfig(config_path);
+
+    CHECK(REXCVAR_GET(test_bool_flag) == false);
+  }
+
+  std::filesystem::remove(config_path);
+  rex::cvar::testing::ResetAllForTesting();
+}
+
+TEST_CASE("cvar precedence holds for flags registered after startup", "[cvar]") {
+  rex::cvar::testing::ResetAllForTesting();
+
+  auto config_path = std::filesystem::temp_directory_path() / "test_late_precedence.toml";
+  {
+    std::ofstream file(config_path);
+    file << "test_late_flag = \"from config\"\n";
+  }
+
+  rex::cvar::LoadConfig(config_path);
+
+  char argv0[] = "cvar_test";
+  char arg1[] = "--test_late_flag=from cmdline";
+  char* argv[] = {argv0, arg1};
+  rex::cvar::Init(2, argv);
+
+  std::string value = "default";
+  {
+    rex::cvar::FlagRegistrar registrar({
+        .name = "test_late_flag",
+        .type = rex::cvar::FlagType::String,
+        .category = "Test",
+        .description = "Late registered flag",
+        .setter =
+            [&value](std::string_view new_value) {
+              value = new_value;
+              return true;
+            },
+        .getter = [&value]() { return value; },
+        .default_value = "default",
+    });
+
+    CHECK(value == "from cmdline");
+  }
+
+  std::filesystem::remove(config_path);
+  rex::cvar::testing::ResetAllForTesting();
 }
 
 TEST_CASE("cvar range validation", "[cvar]") {
@@ -508,7 +695,9 @@ TEST_CASE("cvar SaveConfig", "[cvar]") {
     }
 
     CHECK(content.find("test_int32_flag = 777") != std::string::npos);
-    CHECK(content.find("test_string_flag = \"saved_value\"") != std::string::npos);
+    // The atomic writer serializes through toml++, which emits literal strings.
+    CHECK((content.find("test_string_flag = \"saved_value\"") != std::string::npos ||
+           content.find("test_string_flag = 'saved_value'") != std::string::npos));
 
     std::filesystem::remove(save_path);
   }
@@ -544,5 +733,24 @@ TEST_CASE("cvar ApplyEnvironment", "[cvar]") {
 #else
     unsetenv("REX_TEST_INT32_FLAG");
 #endif
+  }
+}
+
+TEST_CASE("cvar InvokeCommand dispatches commands", "[cvar]") {
+  SECTION("no-arg command is invoked") {
+    g_noarg_cmd_calls = 0;
+    REQUIRE(rex::cvar::InvokeCommand("test_noarg_cmd", ""));
+    CHECK(g_noarg_cmd_calls == 1);
+  }
+  SECTION("arg command receives its arguments") {
+    g_args_cmd_received.clear();
+    REQUIRE(rex::cvar::InvokeCommand("test_args_cmd", "hello world"));
+    CHECK(g_args_cmd_received == "hello world");
+  }
+  SECTION("non-command name returns false") {
+    CHECK_FALSE(rex::cvar::InvokeCommand("test_bool_flag", "x"));
+  }
+  SECTION("missing name returns false") {
+    CHECK_FALSE(rex::cvar::InvokeCommand("does_not_exist", ""));
   }
 }
