@@ -42,6 +42,10 @@ REXCVAR_DEFINE_BOOL(ignore_thread_priorities, true, "Kernel",
 REXCVAR_DEFINE_BOOL(ignore_thread_affinities, true, "Kernel",
                     "Ignores game-specified thread affinities");
 
+REXCVAR_DEFINE_BOOL(ppc_scalar_flush_denormals, true, "CPU",
+                    "Flush scalar PPC subnormals for performance; may break guest behavior")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 namespace rex::system {
 
 const uint32_t XAPC::kSize;
@@ -438,6 +442,16 @@ X_STATUS XThread::Create() {
     // Execute user code.
     current_xthread_tls_ = this;
     running_ = true;
+
+    // Keep the restart-only setting consistent across all guest threads.
+    static const bool flush_scalar_denormals = REXCVAR_GET(ppc_scalar_flush_denormals);
+    auto& fpscr = thread_state_->context()->fpscr;
+    const uint32_t host_csr = fpscr.getcsr();
+    fpscr.InitHost(flush_scalar_denormals);
+    if (!guest_thread_) {
+      fpscr.setcsr(host_csr);
+    }
+
     Execute();
     running_ = false;
     current_xthread_tls_ = nullptr;
@@ -617,8 +631,6 @@ void XThread::Execute() {
     ctx->r9.u64 = args[6];
   if (args.size() > 7)
     ctx->r10.u64 = args[7];
-
-  ctx->fpscr.InitHost();
 
   // Convert this host thread to a fiber so SwitchTo works bidirectionally.
   // Required on Windows before any CreateFiber; provides the fallback handle

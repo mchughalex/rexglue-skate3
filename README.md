@@ -33,6 +33,14 @@ Latest SDK builds and releases are published on [GitHub Releases](https://github
 
 For quick start guide, full CLI reference, and config file options, see the [wiki](https://github.com/rexglue/rexglue-sdk/wiki).
 
+## Scalar floating-point mode
+
+Scalar PowerPC operations flush subnormal values by default to avoid expensive
+denormal audio tails. Titles that require scalar subnormals can launch with
+`--ppc_scalar_flush_denormals=false`. The setting requires a restart and does
+not change VMX flushing. Preserving subnormals may affect CPU and audio
+performance.
+
 # **Disclaimer**
 ReXGlue is not affiliated with nor endorsed by Microsoft or Xbox. It is an independent project created for educational and development purposes. All trademarks and copyrights belong to their respective owners. 
 

@@ -187,6 +187,7 @@ struct FPSCRRegister {
   uint32_t fpu_csr;
   uint32_t vmx_csr;
   bool vmx_mode;
+  bool preserve_scalar_denormals;
 
   static constexpr size_t HostToGuest[] = {kRoundNearest, kRoundDown, kRoundUp, kRoundTowardZero};
 
@@ -199,19 +200,20 @@ struct FPSCRRegister {
   inline uint32_t getcsr() noexcept { return Platform::getcsr(); }
   inline void setcsr(uint32_t csr) noexcept { Platform::setcsr(csr); }
 
-  // Scalar (FPU) mode also runs with flush-to-zero/denormals-are-zero. PPC
-  // hardware processes denormals at full speed, but every denormal operand
-  // on x86 takes a ~100-cycle microcode assist - and audio DSP feedback
-  // tails (e.g. Skate 3's reverb/echo bus) decay straight through denormal
-  // range, stalling the guest audio threads seconds after loud transients
-  // (heard as crackle that starts ~2-3s after impacts and fades with the
-  // tail). Flushing trades exact denormal-range results for hardware-speed
-  // behavior, the same tradeoff other 360 emulators ship.
+  // A zero-initialized register retains the legacy scalar flush behavior.
+  inline void applyScalarFlushMode() noexcept {
+    if (preserve_scalar_denormals) {
+      fpu_csr &= ~FlushMask;
+    } else {
+      fpu_csr |= FlushMask;
+    }
+  }
+
   inline uint32_t loadFromHost() noexcept {
     if (!vmx_mode) {
       fpu_csr = getcsr();
       Platform::InitHostExceptions(fpu_csr);
-      fpu_csr |= FlushMask;
+      applyScalarFlushMode();
       if (vmx_csr == 0) {
         vmx_csr = FlushMask | Platform::GuestToHost[kRoundNearest];
         Platform::InitHostExceptions(vmx_csr);
@@ -224,7 +226,7 @@ struct FPSCRRegister {
   inline void storeFromGuest(uint32_t value) noexcept {
     fpu_csr &= ~RoundMaskVal;
     fpu_csr |= Platform::GuestToHost[value & kRoundMask];
-    fpu_csr |= FlushMask;
+    applyScalarFlushMode();
     Platform::InitHostExceptions(fpu_csr);
     csr = fpu_csr;
     vmx_mode = false;
@@ -259,10 +261,11 @@ struct FPSCRRegister {
     }
   }
 
-  inline void InitHost() noexcept {
+  inline void InitHost(bool flush_scalar_denormals = true) noexcept {
+    preserve_scalar_denormals = !flush_scalar_denormals;
     fpu_csr = getcsr();
     Platform::InitHostExceptions(fpu_csr);
-    fpu_csr |= FlushMask;
+    applyScalarFlushMode();
     vmx_csr = FlushMask | Platform::GuestToHost[kRoundNearest];
     Platform::InitHostExceptions(vmx_csr);
     csr = fpu_csr;
