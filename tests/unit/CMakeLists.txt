@@ -11,6 +11,7 @@ add_executable(unit_tests
     core/chrono_test.cpp
     codegen/config_test.cpp
     codegen/template_registry_test.cpp
+    ppc/fpscr_test.cpp
     ppc/import_function_test.cpp
     ppc/stack_test.cpp
     system/guest_path_test.cpp
@@ -57,6 +58,29 @@ endif()
 # Discover tests
 include(Catch)
 catch_discover_tests(unit_tests
+    TEST_PREFIX "unit."
+    PROPERTIES
+        LABELS "unit"
+        TIMEOUT 60
+)
+
+# Keep rexcore out of this target so the test uses the runtime's CVar registry.
+add_executable(fpscr_cvar_test ppc/fpscr_cvar_test.cpp)
+target_link_libraries(fpscr_cvar_test PRIVATE rexruntime Catch2::Catch2WithMain)
+target_compile_options(fpscr_cvar_test PRIVATE
+    -UTRACY_ENABLE -UREXGLUE_ENABLE_PROFILING
+    -UREXGLUE_ENABLE_PERF_COUNTERS -UREXGLUE_PROFILE_GUEST_FUNCTIONS
+)
+set_target_properties(fpscr_cvar_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+)
+if(UNIX AND NOT APPLE)
+    set_target_properties(fpscr_cvar_test PROPERTIES
+        INSTALL_RPATH "$ORIGIN"
+        BUILD_WITH_INSTALL_RPATH ON
+    )
+endif()
+catch_discover_tests(fpscr_cvar_test
     TEST_PREFIX "unit."
     PROPERTIES
         LABELS "unit"
