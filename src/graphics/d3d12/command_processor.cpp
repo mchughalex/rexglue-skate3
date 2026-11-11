@@ -3353,7 +3353,7 @@ bool D3D12CommandProcessor::IssueCopy() {
   const bool force_readback_window =
       REXCVAR_GET(native_render_force_resolve_readback_max_length) > 0;
   if (readback_mode == ReadbackResolveMode::kDisabled && !force_readback_window &&
-      (!texture_cache_->IsDrawResolutionScaled() || gameplay_state_active)) {
+      gameplay_state_active) {
     uint32_t written_address, written_length;
     // Time the whole resolve (render target dump, copy and clear) for the GPU
     // profile breakdown.
@@ -3387,10 +3387,12 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   bool is_scaled = texture_cache_->IsDrawResolutionScaled();
   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
   if (readback_mode == ReadbackResolveMode::kDisabled) {
+    // The game CPU-encodes this preview at every resolution scale.
+    // Without readback, 1x consumes empty guest memory too.
     constexpr uint32_t kImportSkaterPreviewResolveAddress = UINT32_C(0x04911000);
     constexpr uint32_t kImportSkaterPreviewResolveLength = UINT32_C(0x2D0000);
-    bool force_scaled_resolve_cpu_copy =
-        !IsGameplayStateActive(kernel_state_) && is_scaled &&
+    bool force_preview_readback =
+        !IsGameplayStateActive(kernel_state_) &&
         written_address == kImportSkaterPreviewResolveAddress &&
         written_length == kImportSkaterPreviewResolveLength;
     // Rate-limit the targeted copies: each one is a synchronous GPU drain
@@ -3400,14 +3402,14 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     // in place, which a preview consumer tolerates. The app-armed
     // photo-grab window below is deliberately NOT throttled (the display
     // card composes from exact frames). Mirrors the Vulkan gate.
-    if (force_scaled_resolve_cpu_copy) {
+    if (force_preview_readback) {
       const int32_t min_interval_ms =
           REXCVAR_GET(native_render_targeted_readback_min_interval_ms);
       if (min_interval_ms > 0) {
         static uint64_t s_last_targeted_copy_ms = 0;
         const uint64_t now_ms = rex::chrono::Clock::QueryHostUptimeMillis();
         if (now_ms - s_last_targeted_copy_ms < uint64_t(min_interval_ms)) {
-          force_scaled_resolve_cpu_copy = false;
+          force_preview_readback = false;
         } else {
           s_last_targeted_copy_ms = now_ms;
         }
@@ -3449,7 +3451,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
                                           : " (above window cap - GPU only)");
       }
     }
-    if (!force_scaled_resolve_cpu_copy && !force_window_cpu_copy) {
+    if (!force_preview_readback && !force_window_cpu_copy) {
       return true;
     }
     readback_mode = ReadbackResolveMode::kFull;
