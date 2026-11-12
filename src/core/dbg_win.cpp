@@ -16,6 +16,16 @@
 
 namespace rex::debug {
 
+bool ReadMemory(const void* address, void* dest, size_t length) {
+  if (length == 0)
+    return true;
+  if (!address || !dest)
+    return false;
+
+  SIZE_T copied = 0;
+  return ReadProcessMemory(GetCurrentProcess(), address, dest, length, &copied) && copied == length;
+}
+
 bool IsDebuggerAttached() {
   return IsDebuggerPresent() ? true : false;
 }
