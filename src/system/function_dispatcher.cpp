@@ -13,6 +13,9 @@
  *              role as a function dispatch table rather than a CPU emulator.
  */
 
+#include <array>
+#include <span>
+
 #include <rex/assert.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
@@ -32,9 +35,114 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
   return runtime ? runtime->function_dispatcher() : nullptr;
 }
 
+bool ReadGuestWords(uint8_t* base, uint32_t address, std::span<uint32_t> words) {
+  constexpr uint64_t kGuestAddressSpace = UINT64_C(1) << 32;
+  if (!base || uint64_t(address) + words.size_bytes() > kGuestAddressSpace ||
+      !debug::ReadMemory(base + address, words.data(), words.size_bytes())) {
+    return false;
+  }
+
+  for (auto& word : words)
+    word = rex::byte_swap(word);
+  return true;
+}
+
+void LogGuestWords(const char* label, uint8_t* base, uint32_t address, uint32_t rows) {
+  for (uint32_t row = 0; row < rows; ++row) {
+    std::array<uint32_t, 4> words;
+    const uint64_t current = uint64_t(address) + row * sizeof(words);
+    if (current > UINT32_MAX || !ReadGuestWords(base, uint32_t(current), words)) {
+      REXLOG_CRITICAL("guest memory {} +{:02X}: unreadable", label, row * sizeof(words));
+      return;
+    }
+    REXLOG_CRITICAL("guest memory {} @{:08X}: {:08X} {:08X} {:08X} {:08X}", label,
+                    uint32_t(current), words[0], words[1], words[2], words[3]);
+  }
+}
+
+void LogGuestStack(uint8_t* base, uint32_t sp) {
+  constexpr uint32_t kMaxGuestFrames = 16;
+  constexpr uint32_t kSavedLinkOffset = 8;
+  for (uint32_t frame = 0; frame < kMaxGuestFrames; ++frame) {
+    uint32_t caller = 0, link = 0;
+    if (!ReadGuestWords(base, sp, {&caller, 1}) || caller <= sp || (caller & 15) != 0 ||
+        !ReadGuestWords(base, caller - kSavedLinkOffset, {&link, 1})) {
+      REXLOG_CRITICAL("guest stack stopped at {:08X}: unreadable or invalid backchain", sp);
+      return;
+    }
+    REXLOG_CRITICAL("guest frame {} sp={:08X} caller_sp={:08X} return={:08X}", frame, sp, caller,
+                    link);
+    sp = caller;
+  }
+}
+
+void LogGuestCall(PPCContext& ctx, uint8_t* base) {
+  // Only the invalid-call trap gathers state. Valid dispatch stays unchanged.
+  REXLOG_CRITICAL("guest invalid-call target={:08X}", ctx.last_indirect_target);
+  if (const auto* thread = ThreadState::Get()) {
+    REXLOG_CRITICAL("guest thread id={:08X}", thread->thread_id());
+  }
+#if !defined(REX_CONFIG_SKIP_LR)
+  REXLOG_CRITICAL("guest lr={:016X}", ctx.lr);
+#endif
+#if !defined(REX_CONFIG_CTR_AS_LOCAL)
+  REXLOG_CRITICAL("guest ctr={:016X}", ctx.ctr.u64);
+#endif
+#if !defined(REX_CONFIG_XER_AS_LOCAL)
+  REXLOG_CRITICAL("guest xer so={} ov={} ca={}", ctx.xer.so, ctx.xer.ov, ctx.xer.ca);
+#endif
+#if !defined(REX_CONFIG_CR_AS_LOCAL)
+  REXLOG_CRITICAL("guest cr={:X}{:X}{:X}{:X}{:X}{:X}{:X}{:X}", ctx.cr0.raw(), ctx.cr1.raw(),
+                  ctx.cr2.raw(), ctx.cr3.raw(), ctx.cr4.raw(), ctx.cr5.raw(), ctx.cr6.raw(),
+                  ctx.cr7.raw());
+#endif
+  const std::array<const PPCRegister*, 32> registers = {
+#if !defined(REX_CONFIG_NON_ARGUMENT_AS_LOCAL)
+      &ctx.r0,  &ctx.r1,  &ctx.r2,  &ctx.r3,
+#else
+      nullptr,  &ctx.r1, nullptr, &ctx.r3,
+#endif
+      &ctx.r4,  &ctx.r5,  &ctx.r6,  &ctx.r7,  &ctx.r8,  &ctx.r9,  &ctx.r10,
+#if !defined(REX_CONFIG_NON_ARGUMENT_AS_LOCAL)
+      &ctx.r11, &ctx.r12,
+#else
+      nullptr,  nullptr,
+#endif
+      &ctx.r13,
+#if !defined(REX_CONFIG_NON_VOLATILE_AS_LOCAL)
+      &ctx.r14, &ctx.r15, &ctx.r16, &ctx.r17, &ctx.r18, &ctx.r19, &ctx.r20, &ctx.r21, &ctx.r22,
+      &ctx.r23, &ctx.r24, &ctx.r25, &ctx.r26, &ctx.r27, &ctx.r28, &ctx.r29, &ctx.r30, &ctx.r31,
+#endif
+  };
+  for (size_t reg = 0; reg < registers.size(); ++reg) {
+    if (registers[reg])
+      REXLOG_CRITICAL("guest r{}={:016X}", reg, registers[reg]->u64);
+  }
+
+  constexpr uint32_t kArgumentRows = 4;
+  constexpr uint32_t kNodeRows = 8;
+  LogGuestWords("r1 stack", base, ctx.r1.u32, kArgumentRows);
+  LogGuestWords("r3", base, ctx.r3.u32, kArgumentRows);
+  LogGuestWords("r4", base, ctx.r4.u32, kArgumentRows);
+#if !defined(REX_CONFIG_NON_VOLATILE_AS_LOCAL)
+  std::array<uint32_t, 4> node;
+  if (ReadGuestWords(base, ctx.r31.u32, node) && node[2] == ctx.last_indirect_target) {
+    REXLOG_CRITICAL(
+        "guest callback candidate r31={:08X} next={:08X} prev={:08X} "
+        "target={:08X} data={:08X}",
+        ctx.r31.u32, node[0], node[1], node[2], node[3]);
+  }
+  LogGuestWords("r29", base, ctx.r29.u32, kArgumentRows);
+  LogGuestWords("r30", base, ctx.r30.u32, kArgumentRows);
+  LogGuestWords("r31 node candidate", base, ctx.r31.u32, kNodeRows);
+#endif
+  LogGuestStack(base, ctx.r1.u32);
+}
+
 }  // namespace
 
-static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
+static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* base) {
+  LogGuestCall(ctx, base);
   REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
             ctx.last_indirect_target);
 }

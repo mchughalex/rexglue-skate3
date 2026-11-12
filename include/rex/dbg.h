@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include <fmt/format.h>
@@ -18,6 +19,10 @@
 #include <cstring>
 
 namespace rex::debug {
+
+// Copy diagnostic bytes without faulting on inaccessible or unmapped memory.
+// False may leave a partial copy in dest. This does not change page protection.
+bool ReadMemory(const void* address, void* dest, size_t length);
 
 // Returns true if a debugger is attached to this process.
 // The state may change at any time (attach after launch, etc), so do not
