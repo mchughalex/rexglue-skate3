@@ -5236,7 +5236,7 @@ bool VulkanCommandProcessor::IssueCopy() {
   const bool force_readback_window =
       REXCVAR_GET(native_render_force_resolve_readback_max_length) > 0;
   if (readback_mode == ReadbackResolveMode::kDisabled && !force_readback_window &&
-      (!texture_cache_->IsDrawResolutionScaled() || gameplay_state_active)) {
+      gameplay_state_active) {
     uint32_t written_address = 0;
     uint32_t written_length = 0;
     bool resolved = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
@@ -5579,13 +5579,15 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
       ResolveAutoReadbackMode(GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve)),
                               kernel_state_);
   bool force_scaled_resolve_sync_only = false;
-  bool force_scaled_resolve_cpu_copy = false;
+  bool force_preview_readback = false;
   bool force_window_cpu_copy = false;
   if (readback_mode == ReadbackResolveMode::kDisabled) {
+    // The game CPU-encodes this preview at every resolution scale.
+    // Without readback, 1x consumes empty guest memory too.
     constexpr uint32_t kImportSkaterPreviewResolveAddress = UINT32_C(0x04911000);
     constexpr uint32_t kImportSkaterPreviewResolveLength = UINT32_C(0x2D0000);
-    force_scaled_resolve_cpu_copy =
-        !IsGameplayStateActive(kernel_state_) && is_scaled &&
+    force_preview_readback =
+        !IsGameplayStateActive(kernel_state_) &&
         written_address == kImportSkaterPreviewResolveAddress &&
         written_length == kImportSkaterPreviewResolveLength;
     // Rate-limit the targeted copies: each one is a synchronous GPU drain
@@ -5596,14 +5598,14 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
     // preview consumer tolerates. The app-armed photo-grab window below is
     // deliberately NOT throttled (the display card composes from exact
     // frames).
-    if (force_scaled_resolve_cpu_copy) {
+    if (force_preview_readback) {
       const int32_t min_interval_ms =
           REXCVAR_GET(native_render_targeted_readback_min_interval_ms);
       if (min_interval_ms > 0) {
         static uint64_t s_last_targeted_copy_ms = 0;
         const uint64_t now_ms = rex::chrono::Clock::QueryHostUptimeMillis();
         if (now_ms - s_last_targeted_copy_ms < uint64_t(min_interval_ms)) {
-          force_scaled_resolve_cpu_copy = false;
+          force_preview_readback = false;
         } else {
           s_last_targeted_copy_ms = now_ms;
         }
@@ -5618,16 +5620,16 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
         REXCVAR_GET(native_render_force_resolve_readback_max_length);
     force_window_cpu_copy = force_readback_max_length > 0 &&
                             written_length <= uint32_t(force_readback_max_length);
-    if (!force_scaled_resolve_cpu_copy && !force_window_cpu_copy) {
+    if (!force_preview_readback && !force_window_cpu_copy) {
       log_readback_decision("disabled-after-resolve", readback_mode);
       return true;
     }
     readback_mode = ReadbackResolveMode::kFull;
     force_scaled_resolve_sync_only = true;
     log_readback_decision(
-        force_scaled_resolve_cpu_copy ? "targeted-scaled-resolve-full" : "forced-window-full",
+        force_preview_readback ? "targeted-preview-full" : "forced-window-full",
         readback_mode, false, true,
-        force_scaled_resolve_cpu_copy ? kImportSkaterPreviewResolveLength
+        force_preview_readback ? kImportSkaterPreviewResolveLength
                                       : uint32_t(force_readback_max_length));
     // Unconditional (the debug counters are boot-zeroed by the app): the
     // app-armed shutter-burst window is ~1.5 s and the photo display card
@@ -5636,7 +5638,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
     // log).
     REXLOG_INFO("readback-window: resolve dest=0x{:08X} len=0x{:X} -> CPU copy (kFull{})",
                 written_address, written_length,
-                force_scaled_resolve_cpu_copy ? ", targeted" : ", forced window");
+                force_preview_readback ? ", targeted" : ", forced window");
   }
 
   const int32_t max_readback_length = REXCVAR_GET(vulkan_readback_resolve_max_length);
@@ -5939,7 +5941,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
   }
 
   bool should_copy =
-      (!force_scaled_resolve_sync_only || force_scaled_resolve_cpu_copy ||
+      (!force_scaled_resolve_sync_only || force_preview_readback ||
        force_window_cpu_copy) &&
       ((readback_mode == ReadbackResolveMode::kSome) ? is_cache_miss : true);
   log_readback_decision(should_copy ? "copy-guest-memory" : "cache-hit-skip", readback_mode,
@@ -5961,7 +5963,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
         DebugDumpResolveReadback(written_address, written_length, is_scaled,
                                  readback.mapped_data[read_index]);
       }
-      if (force_window_cpu_copy || force_scaled_resolve_cpu_copy) {
+      if (force_window_cpu_copy || force_preview_readback) {
         // App-armed window content probe (the photo display card composes
         // from exactly these bytes): strided sample of hash + zero fraction
         // so a broken scaled-readback path is visible in the log.
