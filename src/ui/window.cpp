@@ -83,6 +83,15 @@ float Window::AutoFrameCapHz(float refresh_hz) {
   if (refresh_hz < 30.0f) {
     return 0.0f;
   }
+#if REX_PLATFORM_MAC
+  // Built-in 60 Hz Mac panels (MacBook Air, non-ProMotion displays) are fixed
+  // refresh: the VRR margin below would run 56 fps on a 60 Hz screen, which
+  // repeats a frame every quarter second. The compositor latches presents at
+  // vblank anyway, so pace at the refresh itself there.
+  if (refresh_hz <= 61.0f) {
+    return std::round(refresh_hz);
+  }
+#endif
   // 4 FPS of margin or 5% of the refresh rate, whichever is larger (see the
   // declaration): 4 FPS is 6.7% of headroom at 60 Hz but only 0.2 ms of
   // present slack at 144 Hz, within routine thread-scheduling jitter.
